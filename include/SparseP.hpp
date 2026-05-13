@@ -33,12 +33,12 @@ struct SparseMatrix {
 */
 SparseMatrix buildSparseP(
     NCCLCommunicator& comm,      // communicator for all collective operations
-    float* local_data,           // host ptr to this rank's cluster points [local_n * dim]
+    float* d_local_data,         // device ptr to this rank's cluster points [local_n * dim]
     size_t local_n,              // number of owned points on this rank
     int dim,                     // high-dimensional data dimensionality
     int n_neighbors,             // number of nearest neighbors (typically 3 * perplexity)
     float perplexity,            // target perplexity for sigma calibration
-    const float* centroids,      // all cluster centroids [n_clusters * dim]
+    const float* centroids,      // all cluster centroids [n_clusters * dim] (host)
     int n_clusters,              // total number of clusters
     cudaStream_t stream
 );

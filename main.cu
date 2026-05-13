@@ -35,17 +35,18 @@ int main(int argc, char **argv)
     const int K = 100000;
     KMeansResult km = kmeansPartition(*communicator, local_x, local_n, dim, n_clusters, niter, K);
 
-    std::vector<float> h_cluster_data(km.local_data.size());
-    thrust::copy(km.local_data.begin(), km.local_data.end(), h_cluster_data.begin());
-    km.local_data.clear(); km.local_data.shrink_to_fit();
-
     size_t cluster_n = km.local_n;
+    float* d_cluster_data = thrust::raw_pointer_cast(km.local_data.data());
 
     // save for debug
-    std::ofstream ofs("../assignments_rank" + std::to_string(rank) + ".txt");
-    for (size_t i = 0; i < km.local_n; i+=2) {
-        ofs << h_cluster_data[i] << " " << h_cluster_data[i+1]
-            << " " << rank << "\n";
+    {
+        std::vector<float> h_debug(km.local_data.size());
+        thrust::copy(km.local_data.begin(), km.local_data.end(), h_debug.begin());
+        std::ofstream ofs("../assignments_rank" + std::to_string(rank) + ".txt");
+        for (size_t i = 0; i < km.local_n; i++) {
+            ofs << h_debug[i * dim] << " " << h_debug[i * dim + 1]
+                << " " << rank << "\n";
+        }
     }
 
     if (rank == 0) {
@@ -53,20 +54,18 @@ int main(int argc, char **argv)
         for (int c = 0; c < n_clusters; c++) {
             ofs << km.centroids[c * dim] << " " << km.centroids[c * dim + 1] << "\n";
         }
-    } 
+    }
 
-    // 2. BUILD SPARSE P_IJ ON LOCAL CLUSTER
+    // 2. BUILD SPARSE P_IJ ON LOCAL CLUSTER — data stays on GPU
     cudaStream_t sparse_stream;
     cudaStreamCreate(&sparse_stream);
 
     float perplexity = 30.0f;
     int n_neighbors = 90;
 
-    cudaHostRegister(h_cluster_data.data(), h_cluster_data.size() * sizeof(float), cudaHostRegisterDefault);
-
     SparseMatrix P = buildSparseP(
         *communicator,
-        h_cluster_data.data(), cluster_n,
+        d_cluster_data, cluster_n,
         dim, n_neighbors, perplexity,
         km.centroids.data(), km.n_clusters,
         sparse_stream
@@ -106,7 +105,7 @@ int main(int argc, char **argv)
 
     cusparseDestroy(cusparse_handle);
     destroySparseP(P);
-    cudaHostUnregister(h_cluster_data.data());
+    km.local_data.clear(); km.local_data.shrink_to_fit();
     cudaStreamDestroy(sparse_stream);
     cudaHostUnregister(local_x);
 
