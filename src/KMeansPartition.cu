@@ -34,6 +34,7 @@ KMeansResult kmeansPartition(
 
     int n_gpus = 0;
     cudaGetDeviceCount(&n_gpus);
+    int local_gpu_id = rank % n_gpus;
 
     std::vector<faiss::gpu::GpuResourcesProvider*> resources(n_gpus);
     std::vector<int> devs(n_gpus);
@@ -41,6 +42,8 @@ KMeansResult kmeansPartition(
         resources[i] = new faiss::gpu::StandardGpuResources();
         devs[i] = i;
     }
+
+    cudaSetDevice(local_gpu_id);
 
     // Sample random points from local shard
     std::mt19937 rng(1337 + rank);
@@ -99,9 +102,13 @@ KMeansResult kmeansPartition(
 
     comm.broadcast<CommunicationBackend::MPI>(centroids.data(), n_clusters * dim, CommDataType::FLOAT, 0);
 
+    cudaSetDevice(local_gpu_id);
+
     // Assign each local point to nearest centroid
     faiss::gpu::StandardGpuResources assign_res;
-    faiss::gpu::GpuIndexFlat assign_index(&assign_res, dim, faiss::MetricType::METRIC_L2);
+    faiss::gpu::GpuIndexFlatConfig assign_config;
+    assign_config.device = local_gpu_id;
+    faiss::gpu::GpuIndexFlat assign_index(&assign_res, dim, faiss::MetricType::METRIC_L2, assign_config);
     assign_index.add(n_clusters, centroids.data());
 
     thrust::device_vector<float> d_distances(local_n);
