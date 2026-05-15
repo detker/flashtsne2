@@ -117,28 +117,20 @@ static KNNResult runLocalKNN(
     faiss::Index* gpu_index = faiss::gpu::index_cpu_to_gpu_multiple(
         resources, devs, &index_cpu, &opts);
 
-    size_t add_batch = 50000;
-    for (size_t i = 0; i < index_n; i += add_batch) {
-        size_t batch = std::min(add_batch, index_n - i);
-        gpu_index->add(batch, index_data + i * dim);
-    }
+    gpu_index->add(index_n, index_data);
 
     int search_k = strip_self ? n_neighbors + 1 : n_neighbors;
 
     std::vector<float> raw_dist(query_n * search_k);
     std::vector<faiss::idx_t> raw_idx(query_n * search_k);
 
-    size_t query_batch = 50000;
-    for (size_t i = 0; i < query_n; i += query_batch) {
-        size_t batch = std::min(query_batch, query_n - i);
-        gpu_index->search(
-            batch,
-            query_data + i * dim,
-            search_k,
-            raw_dist.data() + i * search_k,
-            raw_idx.data() + i * search_k
-        );
-    }
+    gpu_index->search(
+        query_n,
+        query_data,
+        search_k,
+        raw_dist.data(),
+        raw_idx.data()
+    );
 
     delete gpu_index;
     for (auto r : resources) delete r;
