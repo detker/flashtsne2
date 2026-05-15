@@ -29,7 +29,7 @@ int main(int argc, char **argv)
               << ", Local vectors: " << local_n << std::endl;
     float* local_x = dataset->get_shard_ptr(start_idx, dim);
 
-    cudaHostRegister(local_x, local_n * dim * sizeof(float), cudaHostRegisterDefault);
+    // cudaHostRegister(local_x, local_n * dim * sizeof(float), cudaHostRegisterDefault);
 
     // 1. KMEANS PARTITION + REDISTRIBUTE
     const int K = 100000;
