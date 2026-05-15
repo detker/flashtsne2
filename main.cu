@@ -35,9 +35,6 @@ int main(int argc, char **argv)
     const int K = 100000;
     KMeansResult km = kmeansPartition(*communicator, local_x, local_n, dim, n_clusters, niter, K);
 
-    size_t cluster_n = km.local_n;
-    float* d_cluster_data = thrust::raw_pointer_cast(km.local_data.data());
-
     // save for debug
     {
         std::vector<float> h_debug(km.local_data.size());
@@ -55,6 +52,9 @@ int main(int argc, char **argv)
             ofs << km.centroids[c * dim] << " " << km.centroids[c * dim + 1] << "\n";
         }
     }
+
+    size_t cluster_n = km.local_n;
+    float* d_cluster_data = thrust::raw_pointer_cast(km.local_data.data());
 
     // 2. BUILD SPARSE P_IJ ON LOCAL CLUSTER — data stays on GPU
     cudaStream_t sparse_stream;

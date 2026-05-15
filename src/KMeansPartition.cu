@@ -114,14 +114,14 @@ KMeansResult kmeansPartition(
                         thrust::raw_pointer_cast(d_labels.data()));
     cudaDeviceSynchronize();
 
-    local_cluster_data.clear(); local_cluster_data.shrink_to_fit();
 
     // Redistribute points so each rank owns spatially nearby points
     auto distributed_points = comm.distributeData(
-        thrust::raw_pointer_cast(d_labels.data()), dim, local_x, local_n);
+        thrust::raw_pointer_cast(d_labels.data()), dim, thrust::raw_pointer_cast(local_cluster_data.data()), local_n);
 
     d_distances.clear(); d_distances.shrink_to_fit();
     d_labels.clear(); d_labels.shrink_to_fit();
+    local_cluster_data.clear(); local_cluster_data.shrink_to_fit();
 
     size_t cluster_n = distributed_points.size() / dim;
     std::cout << "Rank " << rank << ": received " << cluster_n

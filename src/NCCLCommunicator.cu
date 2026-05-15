@@ -55,7 +55,7 @@ int NCCLCommunicator::getSize() const { return _size; }
 
 
 thrust::device_vector<float> NCCLCommunicator::distributeData(faiss::idx_t *d_assignments, int dim,
-                                                              float *local_x, int n_local) {
+                                                              float *d_local_x, int n_local) {
   cudaSetDevice(_local_gpu_id);
   auto get_target_node = [=](int cluster_id) { return cluster_id % _size; };
 
@@ -103,10 +103,10 @@ thrust::device_vector<float> NCCLCommunicator::distributeData(faiss::idx_t *d_as
   thrust::sort_by_key(d_sort_keys.begin(), d_sort_keys.end(), d_indices.begin());
 
   // Copy local_x from host to device
-  float *d_local_x;
-  cudaMalloc(&d_local_x, (size_t)n_local * dim * sizeof(float));
-  cudaMemcpy(d_local_x, local_x, (size_t)n_local * dim * sizeof(float),
-             cudaMemcpyHostToDevice);
+  // float *d_local_x;
+  // cudaMalloc(&d_local_x, (size_t)n_local * dim * sizeof(float));
+  // cudaMemcpy(d_local_x, local_x, (size_t)n_local * dim * sizeof(float),
+  //            cudaMemcpyHostToDevice);
 
   thrust::device_vector<float> d_send(n_local * dim);
   {
@@ -118,7 +118,7 @@ thrust::device_vector<float> NCCLCommunicator::distributeData(faiss::idx_t *d_as
     cudaStreamSynchronize(0);
   }
 
-  cudaFree(d_local_x);
+  // cudaFree(d_local_x);
 
   // Bulk data exchange via NCCL
   thrust::device_vector<float> d_recv(total_recv);

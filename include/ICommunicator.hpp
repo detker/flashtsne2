@@ -64,7 +64,7 @@ public:
                    const int* rdispls, CommDataType recvType);
 
     thrust::device_vector<float> distributeData(faiss::idx_t *d_assignments, int dim,
-                                                float *local_x, int n_local);
+                                                float *d_local_x, int n_local);
 
     static ncclDataType_t mapTypeNCCL(CommDataType t);
     static size_t typeSizeNCCL(CommDataType t);
