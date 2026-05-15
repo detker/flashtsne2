@@ -21,7 +21,7 @@
 
 KMeansResult kmeansPartition(
     NCCLCommunicator& comm,
-    float* local_x,
+    float *local_x,
     size_t local_n,
     int dim,
     int n_clusters,
@@ -45,6 +45,8 @@ KMeansResult kmeansPartition(
 
     cudaSetDevice(local_gpu_id);
 
+    thrust::device_vector<float> local_cluster_data(local_x, local_x + local_n * dim);
+
     // Sample random points from local shard
     std::mt19937 rng(1337 + rank);
     std::uniform_int_distribution<size_t> dist(0, local_n - 1);
@@ -57,7 +59,7 @@ KMeansResult kmeansPartition(
     thrust::device_vector<int> d_sample_indices(h_sample_indices.begin(), h_sample_indices.end());
     thrust::device_vector<float> d_sample_ptr(K * dim);
 
-    float2* raw_local_x_f2 = reinterpret_cast<float2*>(local_x);
+    float2* raw_local_x_f2 = reinterpret_cast<float2*>(thrust::raw_pointer_cast(local_cluster_data.data()));
     float2* d_sample_ptr_f2 = reinterpret_cast<float2*>(thrust::raw_pointer_cast(d_sample_ptr.data()));
 
     thrust::gather(thrust::device,
@@ -114,10 +116,12 @@ KMeansResult kmeansPartition(
     thrust::device_vector<float> d_distances(local_n);
     thrust::device_vector<faiss::idx_t> d_labels(local_n);
 
-    assign_index.search(local_n, local_x, 1,
+    assign_index.search(local_n, thrust::raw_pointer_cast(local_cluster_data.data()), 1,
                         thrust::raw_pointer_cast(d_distances.data()),
                         thrust::raw_pointer_cast(d_labels.data()));
     cudaDeviceSynchronize();
+
+    local_cluster_data.clear(); local_cluster_data.shrink_to_fit();
 
     // Redistribute points so each rank owns spatially nearby points
     auto distributed_points = comm.distributeData(
