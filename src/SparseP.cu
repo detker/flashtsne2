@@ -128,39 +128,28 @@ static KNNResult runLocalKNN(
     int dim, int n_neighbors,
     bool strip_self)
 {
-    int n_gpus = 0;
-    cudaGetDeviceCount(&n_gpus);
+    int current_dev = 0;
+    cudaGetDevice(&current_dev);
 
-    std::vector<faiss::gpu::GpuResourcesProvider*> resources(n_gpus);
-    std::vector<int> devs(n_gpus);
-    for (int i = 0; i < n_gpus; i++) {
-        resources[i] = new faiss::gpu::StandardGpuResources();
-        devs[i] = i;
-    }
+    faiss::gpu::StandardGpuResources res;
+    faiss::gpu::GpuIndexFlatConfig config;
+    config.device = current_dev;
+    faiss::gpu::GpuIndexFlatL2 gpu_index(&res, dim, config);
 
-    faiss::IndexFlatL2 index_cpu(dim);
-    faiss::gpu::GpuMultipleClonerOptions opts;
-    opts.shard = true;
-    faiss::Index* gpu_index = faiss::gpu::index_cpu_to_gpu_multiple(
-        resources, devs, &index_cpu, &opts);
-
-    gpu_index->add(index_n, d_index_data);
+    gpu_index.add(index_n, d_index_data);
 
     int search_k = strip_self ? n_neighbors + 1 : n_neighbors;
 
     thrust::device_vector<float> d_raw_dist(query_n * search_k);
     thrust::device_vector<faiss::idx_t> d_raw_idx(query_n * search_k);
 
-    gpu_index->search(
+    gpu_index.search(
         query_n,
         d_query_data,
         search_k,
         thrust::raw_pointer_cast(d_raw_dist.data()),
         thrust::raw_pointer_cast(d_raw_idx.data())
     );
-
-    delete gpu_index;
-    for (auto r : resources) delete r;
 
     KNNResult result;
 
