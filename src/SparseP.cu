@@ -11,6 +11,9 @@
 
 #include <thrust/device_vector.h>
 #include <thrust/host_vector.h>
+#include <thrust/sequence.h>
+#include <thrust/copy.h>
+#include <thrust/functional.h>
 
 #include <cusparse.h>
 
@@ -117,6 +120,77 @@ __global__ void fillGlobalIds(
 }
 
 
+__global__ void extractKthDistances(
+    const float* __restrict__ d_all_dists,
+    float* __restrict__ d_kth,
+    int local_n,
+    int n_neighbors)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= local_n) return;
+    d_kth[i] = d_all_dists[i * n_neighbors + (n_neighbors - 1)];
+}
+
+
+__global__ void detectBoundaryPoints(
+    const float* __restrict__ d_local_data,
+    const float* __restrict__ d_centroids,
+    const float* __restrict__ d_kth_distances,
+    bool* __restrict__ d_flags,
+    int local_n,
+    int dim,
+    int n_clusters,
+    int n_ranks,
+    int rank)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= local_n) return;
+
+    float reach = d_kth_distances[i];
+    const float* pt = d_local_data + i * dim;
+
+    float own_dist = 0.0f;
+    for (int d = 0; d < dim; d++) {
+        float diff = pt[d] - d_centroids[rank * dim + d];
+        own_dist += diff * diff;
+    }
+
+    for (int c = 0; c < n_clusters; c++) {
+        int target_rank = c % n_ranks;
+        if (target_rank == rank) continue;
+
+        float foreign_dist = 0.0f;
+        for (int d = 0; d < dim; d++) {
+            float diff = pt[d] - d_centroids[c * dim + d];
+            foreign_dist += diff * diff;
+        }
+
+        float boundary_margin = foreign_dist - own_dist;
+        if (boundary_margin < 2.0f * reach) {
+            d_flags[i * n_ranks + target_rank] = true;
+        }
+    }
+}
+
+
+__global__ void stripSelfNeighbor(
+    const float* __restrict__ in_dist,
+    const faiss::idx_t* __restrict__ in_idx,
+    float* __restrict__ out_dist,
+    faiss::idx_t* __restrict__ out_idx,
+    int query_n,
+    int n_neighbors)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= query_n * n_neighbors) return;
+    int row = tid / n_neighbors;
+    int col = tid % n_neighbors;
+    int search_k = n_neighbors + 1;
+    out_dist[tid] = in_dist[row * search_k + col + 1];
+    out_idx[tid] = in_idx[row * search_k + col + 1];
+}
+
+
 struct KNNResult {
     thrust::device_vector<float> d_distances;    // [query_n * k] on GPU
     thrust::device_vector<faiss::idx_t> d_indices; // [query_n * k] on GPU
@@ -154,35 +228,17 @@ static KNNResult runLocalKNN(
     KNNResult result;
 
     if (strip_self) {
-        // Self-stripping on CPU (indices are small relative to point data)
-        std::vector<float> h_dist(query_n * search_k);
-        std::vector<faiss::idx_t> h_idx(query_n * search_k);
-        CUDA_CHECK(cudaMemcpy(h_dist.data(), thrust::raw_pointer_cast(d_raw_dist.data()),
-                              query_n * search_k * sizeof(float), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(h_idx.data(), thrust::raw_pointer_cast(d_raw_idx.data()),
-                              query_n * search_k * sizeof(faiss::idx_t), cudaMemcpyDeviceToHost));
-
-        std::vector<float> out_dist(query_n * n_neighbors);
-        std::vector<faiss::idx_t> out_idx(query_n * n_neighbors);
-
-        for (size_t i = 0; i < query_n; i++) {
-            int out = 0;
-            for (int j = 0; j < search_k && out < n_neighbors; j++) {
-                if (h_idx[i * search_k + j] != (faiss::idx_t)i) {
-                    out_dist[i * n_neighbors + out] = h_dist[i * search_k + j];
-                    out_idx[i * n_neighbors + out] = h_idx[i * search_k + j];
-                    out++;
-                }
-            }
-            while (out < n_neighbors) {
-                out_dist[i * n_neighbors + out] = 0.0f;
-                out_idx[i * n_neighbors + out] = i;
-                out++;
-            }
-        }
-
-        result.d_distances.assign(out_dist.begin(), out_dist.end());
-        result.d_indices.assign(out_idx.begin(), out_idx.end());
+        result.d_distances.resize(query_n * n_neighbors);
+        result.d_indices.resize(query_n * n_neighbors);
+        int total = query_n * n_neighbors;
+        int grid = (total + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        stripSelfNeighbor<<<grid, BLOCK_SIZE>>>(
+            thrust::raw_pointer_cast(d_raw_dist.data()),
+            thrust::raw_pointer_cast(d_raw_idx.data()),
+            thrust::raw_pointer_cast(result.d_distances.data()),
+            thrust::raw_pointer_cast(result.d_indices.data()),
+            query_n, n_neighbors);
+        CUDA_CHECK(cudaDeviceSynchronize());
     } else {
         result.d_distances = std::move(d_raw_dist);
         result.d_indices = std::move(d_raw_idx);
@@ -192,13 +248,16 @@ static KNNResult runLocalKNN(
 }
 
 
-static float sqDistCPU(const float* a, const float* b, int dim) {
-    float d = 0.0f;
-    for (int i = 0; i < dim; i++) {
-        float diff = a[i] - b[i];
-        d += diff * diff;
-    }
-    return d;
+__global__ void extractFlagColumn(
+    const bool* __restrict__ d_flags,
+    bool* __restrict__ d_col,
+    int local_n,
+    int n_ranks,
+    int target_rank)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= local_n) return;
+    d_col[i] = d_flags[i * n_ranks + target_rank];
 }
 
 
@@ -213,57 +272,87 @@ static HaloGPU exchangeHalos(
     float* d_local_data,
     size_t local_n,
     int dim,
-    const float* centroids,
+    const float* d_centroids,
     int n_clusters,
     int rank,
     int n_ranks,
-    const std::vector<float>& kth_distances,
+    const float* d_kth_distances,
     const std::vector<int>& rank_offsets)
 {
-    // Boundary detection on CPU - needs centroid distances per point.
-    // We only need local_data on host for this step.
-    std::vector<float> h_local(local_n * dim);
-    CUDA_CHECK(cudaMemcpy(h_local.data(), d_local_data,
-                          local_n * dim * sizeof(float), cudaMemcpyDeviceToHost));
-
-    std::vector<std::vector<int>> outgoing(n_ranks);
-
-    for (size_t i = 0; i < local_n; i++) {
-        float reach = kth_distances[i];
-        const float* pt = h_local.data() + i * dim;
-        float own_centroid_dist = sqDistCPU(pt, centroids + rank * dim, dim);
-
-        for (int c = 0; c < n_clusters; c++) {
-            int target_rank = c % n_ranks;
-            if (target_rank == rank) continue;
-            float foreign_dist = sqDistCPU(pt, centroids + c * dim, dim);
-            float boundary_margin = foreign_dist - own_centroid_dist;
-            if (boundary_margin < 2.0f * reach) {
-                outgoing[target_rank].push_back(i);
-            }
-        }
-    }
-    h_local.clear();
-
-    for (int r = 0; r < n_ranks; r++) {
-        std::sort(outgoing[r].begin(), outgoing[r].end());
-        outgoing[r].erase(std::unique(outgoing[r].begin(), outgoing[r].end()), outgoing[r].end());
-    }
-
     int my_global_offset = rank_offsets[rank];
 
-    // Flatten send indices and compute per-rank counts
-    std::vector<int> send_counts_pts(n_ranks);
-    std::vector<int> send_counts_ids(n_ranks);
-    std::vector<int> all_send_indices;
-    for (int r = 0; r < n_ranks; r++) {
-        send_counts_pts[r] = outgoing[r].size() * dim;
-        send_counts_ids[r] = outgoing[r].size();
-        all_send_indices.insert(all_send_indices.end(), outgoing[r].begin(), outgoing[r].end());
-    }
-    int total_send_ids = all_send_indices.size();
+    // Boundary detection on GPU: flag[i * n_ranks + r] = true if point i should go to rank r
+    thrust::device_vector<bool> d_flags(local_n * n_ranks, false);
 
-    // MPI for lightweight count exchange
+    {
+        int grid = (local_n + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        detectBoundaryPoints<<<grid, BLOCK_SIZE>>>(
+            d_local_data, d_centroids, d_kth_distances,
+            thrust::raw_pointer_cast(d_flags.data()),
+            local_n, dim, n_clusters, n_ranks, rank);
+        CUDA_CHECK(cudaDeviceSynchronize());
+    }
+
+    // Per-rank compaction: for each target rank, stream-compact flagged point indices
+    std::vector<int> send_counts_ids(n_ranks, 0);
+    std::vector<int> send_counts_pts(n_ranks, 0);
+    std::vector<thrust::device_vector<int>> d_per_rank_indices(n_ranks);
+
+    thrust::device_vector<int> d_iota(local_n);
+    thrust::sequence(d_iota.begin(), d_iota.end(), 0);
+
+    thrust::device_vector<bool> d_col(local_n);
+    thrust::device_vector<int> d_compact(local_n);
+    int col_grid = (local_n + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+    for (int r = 0; r < n_ranks; r++) {
+        if (r == rank) continue;
+
+        extractFlagColumn<<<col_grid, BLOCK_SIZE>>>(
+            thrust::raw_pointer_cast(d_flags.data()),
+            thrust::raw_pointer_cast(d_col.data()),
+            local_n, n_ranks, r);
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        auto end = thrust::copy_if(
+            d_iota.begin(), d_iota.end(),
+            d_col.begin(),
+            d_compact.begin(),
+            thrust::identity<bool>());
+
+        int count = end - d_compact.begin();
+        d_per_rank_indices[r].assign(d_compact.begin(), d_compact.begin() + count);
+        send_counts_ids[r] = count;
+        send_counts_pts[r] = count * dim;
+    }
+    d_flags.clear(); d_flags.shrink_to_fit();
+    d_col.clear(); d_col.shrink_to_fit();
+    d_compact.clear(); d_compact.shrink_to_fit();
+    d_iota.clear(); d_iota.shrink_to_fit();
+
+    // Flatten per-rank indices into a single contiguous device buffer
+    int total_send_ids = 0;
+    std::vector<int> send_displs_ids(n_ranks, 0);
+    for (int r = 0; r < n_ranks; r++) {
+        send_displs_ids[r] = total_send_ids;
+        total_send_ids += send_counts_ids[r];
+    }
+    std::vector<int> send_displs_pts(n_ranks, 0);
+    for (int r = 0; r < n_ranks; r++) {
+        send_displs_pts[r] = send_displs_ids[r] * dim;
+    }
+    int total_send_pts = total_send_ids * dim;
+
+    thrust::device_vector<int> d_all_send_indices(total_send_ids);
+    for (int r = 0; r < n_ranks; r++) {
+        if (send_counts_ids[r] > 0) {
+            thrust::copy(d_per_rank_indices[r].begin(), d_per_rank_indices[r].end(),
+                         d_all_send_indices.begin() + send_displs_ids[r]);
+        }
+    }
+    d_per_rank_indices.clear();
+
+    // MPI count exchange
     std::vector<int> recv_counts_pts(n_ranks);
     std::vector<int> recv_counts_ids(n_ranks);
     comm.allToAll<MPI_B>(send_counts_pts.data(), 1, CommDataType::INT,
@@ -271,31 +360,24 @@ static HaloGPU exchangeHalos(
     comm.allToAll<MPI_B>(send_counts_ids.data(), 1, CommDataType::INT,
                          recv_counts_ids.data(), 1, CommDataType::INT);
 
-    std::vector<int> send_displs_pts(n_ranks, 0);
     std::vector<int> recv_displs_pts(n_ranks, 0);
-    std::vector<int> send_displs_ids(n_ranks, 0);
     std::vector<int> recv_displs_ids(n_ranks, 0);
     for (int i = 1; i < n_ranks; i++) {
-        send_displs_pts[i] = send_displs_pts[i-1] + send_counts_pts[i-1];
         recv_displs_pts[i] = recv_displs_pts[i-1] + recv_counts_pts[i-1];
-        send_displs_ids[i] = send_displs_ids[i-1] + send_counts_ids[i-1];
         recv_displs_ids[i] = recv_displs_ids[i-1] + recv_counts_ids[i-1];
     }
 
-    int total_send_pts = send_displs_pts[n_ranks-1] + send_counts_pts[n_ranks-1];
     int total_recv_pts = recv_displs_pts[n_ranks-1] + recv_counts_pts[n_ranks-1];
     int total_recv_ids = recv_displs_ids[n_ranks-1] + recv_counts_ids[n_ranks-1];
 
-    // Upload gather indices to GPU, gather send points directly from device data
-    thrust::device_vector<int> d_send_indices(all_send_indices.begin(), all_send_indices.end());
-
+    // Gather send points on GPU
     float* d_send_pts = nullptr;
     if (total_send_pts > 0) {
         CUDA_CHECK(cudaMalloc(&d_send_pts, total_send_pts * sizeof(float)));
         int grid = (total_send_ids * dim + BLOCK_SIZE - 1) / BLOCK_SIZE;
         gatherRowsForSend<<<grid, BLOCK_SIZE>>>(
             d_local_data, d_send_pts,
-            thrust::raw_pointer_cast(d_send_indices.data()),
+            thrust::raw_pointer_cast(d_all_send_indices.data()),
             total_send_ids, dim);
         CUDA_CHECK(cudaDeviceSynchronize());
     }
@@ -307,11 +389,11 @@ static HaloGPU exchangeHalos(
         int grid = (total_send_ids + BLOCK_SIZE - 1) / BLOCK_SIZE;
         fillGlobalIds<<<grid, BLOCK_SIZE>>>(
             d_send_ids,
-            thrust::raw_pointer_cast(d_send_indices.data()),
+            thrust::raw_pointer_cast(d_all_send_indices.data()),
             total_send_ids, my_global_offset);
         CUDA_CHECK(cudaDeviceSynchronize());
     }
-    d_send_indices.clear(); d_send_indices.shrink_to_fit();
+    d_all_send_indices.clear(); d_all_send_indices.shrink_to_fit();
 
     // Allocate receive buffers on GPU
     float* d_recv_pts = nullptr;
@@ -464,24 +546,29 @@ SparseMatrix buildSparseP(
         d_local_data, local_n,
         dim, n_neighbors, true);
 
-    // Extract kth-distances to host for boundary detection
-    std::vector<float> kth_distances(local_n);
+    // Extract kth-distances on device
+    thrust::device_vector<float> d_kth_distances(local_n);
     {
-        std::vector<float> h_dists(local_n * n_neighbors);
-        CUDA_CHECK(cudaMemcpy(h_dists.data(), thrust::raw_pointer_cast(local_knn.d_distances.data()),
-                              local_n * n_neighbors * sizeof(float), cudaMemcpyDeviceToHost));
-        for (size_t i = 0; i < local_n; i++) {
-            kth_distances[i] = h_dists[i * n_neighbors + (n_neighbors - 1)];
-        }
+        int grid = (local_n + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        extractKthDistances<<<grid, BLOCK_SIZE>>>(
+            thrust::raw_pointer_cast(local_knn.d_distances.data()),
+            thrust::raw_pointer_cast(d_kth_distances.data()),
+            local_n, n_neighbors);
+        CUDA_CHECK(cudaDeviceSynchronize());
     }
+
+    // Upload centroids to device
+    thrust::device_vector<float> d_centroids(centroids, centroids + n_clusters * dim);
 
     // 2. HALO EXCHANGE — ghost points arrive on GPU
     if (rank == 0) std::cout << "Step 2b: Exchanging halo/ghost points with global IDs..." << std::endl;
 
     HaloGPU halo = exchangeHalos(
         comm, d_local_data, local_n, dim,
-        centroids, n_clusters, rank, n_ranks,
-        kth_distances, rank_offsets);
+        thrust::raw_pointer_cast(d_centroids.data()), n_clusters, rank, n_ranks,
+        thrust::raw_pointer_cast(d_kth_distances.data()), rank_offsets);
+    d_kth_distances.clear(); d_kth_distances.shrink_to_fit();
+    d_centroids.clear(); d_centroids.shrink_to_fit();
 
     std::cout << "Rank " << rank << ": received " << halo.n_ghosts << " ghost points" << std::endl;
 
