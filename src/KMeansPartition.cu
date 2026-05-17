@@ -21,7 +21,7 @@
 
 KMeansResult kmeansPartition(
     NCCLCommunicator& comm,
-    float* local_x,
+    thrust::device_vector<float> local_cluster_data,
     size_t local_n,
     int dim,
     int n_clusters,
@@ -42,9 +42,8 @@ KMeansResult kmeansPartition(
         devs[i] = i;
     }
 
-    thrust::device_vector<float> local_cluster_data(local_x, local_x + local_n * dim);
+    //thrust::device_vector<float> local_cluster_data(local_x, local_x + local_n * dim);
 
-    // Sample random points from local shard
     std::mt19937 rng(1337 + rank);
     std::uniform_int_distribution<size_t> dist(0, local_n - 1);
 

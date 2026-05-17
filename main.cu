@@ -30,10 +30,11 @@ int main(int argc, char **argv)
     float* local_x = dataset->get_shard_ptr(start_idx, dim);
 
     // cudaHostRegister(local_x, local_n * dim * sizeof(float), cudaHostRegisterDefault);
+    thrust::device_vector<float> local_cluster_data(local_x, local_x + local_n * dim);
 
     // 1. KMEANS PARTITION + REDISTRIBUTE
-    const int K = 100000;
-    KMeansResult km = kmeansPartition(*communicator, local_x, local_n, dim, n_clusters, niter, K);
+    const int K = 0.1 * local_n + 1;
+    KMeansResult km = kmeansPartition(*communicator, local_cluster_data, local_n, dim, n_clusters, niter, K);
 
     // save for debug
     {

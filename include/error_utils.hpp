@@ -12,6 +12,29 @@
         exit(1);                                                                              \
     } } while(0)
 
+
+// void nccl_check(ncclResult_t status, const char *file, int line) {
+//   if (status != ncclSuccess) {
+//     printf("[NCCL ERROR] at file %s:%d:\n%s\n", file, line,
+//            ncclGetErrorString(status));
+//     exit(EXIT_FAILURE);
+//   }
+// }
+// #define NCCL_CHECK(err) (nccl_check(err, __FILE__, __LINE__))
+
+// void mpi_check(int status, const char *file, int line) {
+//   if (status != MPI_SUCCESS) {
+//     char mpi_error[4096];
+//     int mpi_error_len = 0;
+//     assert(MPI_Error_string(status, &mpi_error[0], &mpi_error_len) ==
+//            MPI_SUCCESS);
+//     printf("[MPI ERROR] at file %s:%d:\n%.*s\n", file, line, mpi_error_len,
+//            mpi_error);
+//     exit(EXIT_FAILURE);
+//   }
+// }
+// #define MPI_CHECK(err) (mpi_check(err, __FILE__, __LINE__))
+
 #define NCCL_CHECK(call) do {                                                                 \
     ncclResult_t r = (call);                                                                   \
     if (r != ncclSuccess) {                                                                   \
