@@ -36,6 +36,7 @@ int main(int argc, char **argv)
     const int K = 0.1 * local_n + 1;
     KMeansResult km = kmeansPartition(*communicator, local_cluster_data, local_n, dim, n_clusters, niter, K);
 
+    local_cluster_data.clear(); local_cluster_data.shrink_to_fit();
     // save for debug
     {
         std::vector<float> h_debug(km.local_data.size());
@@ -57,12 +58,12 @@ int main(int argc, char **argv)
     size_t cluster_n = km.local_n;
     float* d_cluster_data = thrust::raw_pointer_cast(km.local_data.data());
 
-    // 2. BUILD SPARSE P_IJ ON LOCAL CLUSTER — data stays on GPU
+    // 2. BUILD SPARSE P_IJ ON LOCAL CLUSTER - data stays on GPU
     cudaStream_t sparse_stream;
     cudaStreamCreate(&sparse_stream);
 
     float perplexity = 30.0f;
-    int n_neighbors = 90;
+    int n_neighbors = perplexity * 3;
 
     SparseMatrix P = buildSparseP(
         *communicator,
@@ -71,6 +72,8 @@ int main(int argc, char **argv)
         km.centroids.data(), km.n_clusters,
         sparse_stream
     );
+
+    std::cout << "Rank: " << rank << ". Done." << std::endl;
 
     int n_rows_to_print = std::min((int)P.n_rows, 5);
     std::vector<int> h_row_off(n_rows_to_print + 1);
@@ -108,7 +111,7 @@ int main(int argc, char **argv)
     destroySparseP(P);
     km.local_data.clear(); km.local_data.shrink_to_fit();
     cudaStreamDestroy(sparse_stream);
-    cudaHostUnregister(local_x);
+    //cudaHostUnregister(local_x);
 
     delete communicator;
     delete dataset;

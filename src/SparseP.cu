@@ -25,7 +25,7 @@
 
 
 static constexpr int BLOCK_SIZE = 256;
-static constexpr int MAX_BINARY_SEARCH_ITERS = 200;
+static constexpr int MAX_BINARY_SEARCH_ITERS = 100;
 static constexpr float PERPLEXITY_TOL = 1e-5f;
 
 using MPI_B = CommunicationBackend::MPI;
@@ -33,8 +33,7 @@ using NCCL_B = CommunicationBackend::NCCL;
 
 
 __global__ void computeConditionalP(
-    const float* __restrict__ distances,
-    float* __restrict__ p_values,
+    float* __restrict__ dist_p,
     int n,
     int k,
     float target_entropy)
@@ -42,8 +41,7 @@ __global__ void computeConditionalP(
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
 
-    const float* dist_row = distances + (int64_t)i * k;
-    float* p_row = p_values + (int64_t)i * k;
+    float* row = dist_p + (int64_t)i * k;
 
     float beta_min = 1e-10f;
     float beta_max = 1e10f;
@@ -51,19 +49,18 @@ __global__ void computeConditionalP(
 
     for (int iter = 0; iter < MAX_BINARY_SEARCH_ITERS; iter++) {
         float sum_exp = 0.0f;
+        float entropy = 0.0f;
         for (int j = 0; j < k; j++) {
-            float val = expf(-beta * dist_row[j]);
-            p_row[j] = val;
+            float val = expf(-beta * row[j]);
             sum_exp += val;
         }
         if (sum_exp < 1e-30f) sum_exp = 1e-30f;
 
         float inv_sum = 1.0f / sum_exp;
-        float entropy = 0.0f;
         for (int j = 0; j < k; j++) {
-            p_row[j] *= inv_sum;
-            if (p_row[j] > 1e-30f) {
-                entropy -= p_row[j] * logf(p_row[j]);
+            float p = expf(-beta * row[j]) * inv_sum;
+            if (p > 1e-30f) {
+                entropy -= p * logf(p);
             }
         }
 
@@ -81,14 +78,12 @@ __global__ void computeConditionalP(
 
     float sum_exp = 0.0f;
     for (int j = 0; j < k; j++) {
-        float val = expf(-beta * dist_row[j]);
-        p_row[j] = val;
-        sum_exp += val;
+        sum_exp += expf(-beta * row[j]);
     }
     if (sum_exp < 1e-30f) sum_exp = 1e-30f;
     float inv_sum = 1.0f / sum_exp;
     for (int j = 0; j < k; j++) {
-        p_row[j] *= inv_sum;
+        row[j] = expf(-beta * row[j]) * inv_sum;
     }
 }
 
@@ -132,45 +127,6 @@ __global__ void extractKthDistances(
 }
 
 
-__global__ void detectBoundaryPoints(
-    const float* __restrict__ d_local_data,
-    const float* __restrict__ d_centroids,
-    const float* __restrict__ d_kth_distances,
-    bool* __restrict__ d_flags,
-    int local_n,
-    int dim,
-    int n_clusters,
-    int n_ranks,
-    int rank)
-{
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= local_n) return;
-
-    float reach = d_kth_distances[i];
-    const float* pt = d_local_data + i * dim;
-
-    float own_dist = 0.0f;
-    for (int d = 0; d < dim; d++) {
-        float diff = pt[d] - d_centroids[rank * dim + d];
-        own_dist += diff * diff;
-    }
-
-    for (int c = 0; c < n_clusters; c++) {
-        int target_rank = c % n_ranks;
-        if (target_rank == rank) continue;
-
-        float foreign_dist = 0.0f;
-        for (int d = 0; d < dim; d++) {
-            float diff = pt[d] - d_centroids[c * dim + d];
-            foreign_dist += diff * diff;
-        }
-
-        float boundary_margin = foreign_dist - own_dist;
-        if (boundary_margin < 2.0f * reach) {
-            d_flags[i * n_ranks + target_rank] = true;
-        }
-    }
-}
 
 
 __global__ void stripSelfNeighbor(
@@ -238,6 +194,7 @@ static KNNResult runLocalKNN(
             thrust::raw_pointer_cast(result.d_distances.data()),
             thrust::raw_pointer_cast(result.d_indices.data()),
             query_n, n_neighbors);
+        CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaDeviceSynchronize());
     } else {
         result.d_distances = std::move(d_raw_dist);
@@ -248,16 +205,47 @@ static KNNResult runLocalKNN(
 }
 
 
-__global__ void extractFlagColumn(
-    const bool* __restrict__ d_flags,
+__global__ void detectBoundaryForRank(
+    const float* __restrict__ d_local_data,
+    const float* __restrict__ d_centroids,
+    const float* __restrict__ d_kth_distances,
     bool* __restrict__ d_col,
     int local_n,
+    int dim,
+    int n_clusters,
     int n_ranks,
+    int rank,
     int target_rank)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= local_n) return;
-    d_col[i] = d_flags[i * n_ranks + target_rank];
+
+    float reach = d_kth_distances[i];
+    const float* pt = d_local_data + i * dim;
+
+    float own_dist = 0.0f;
+    for (int d = 0; d < dim; d++) {
+        float diff = pt[d] - d_centroids[rank * dim + d];
+        own_dist += diff * diff;
+    }
+
+    bool is_boundary = false;
+    for (int c = 0; c < n_clusters; c++) {
+        if (c % n_ranks != target_rank) continue;
+
+        float foreign_dist = 0.0f;
+        for (int d = 0; d < dim; d++) {
+            float diff = pt[d] - d_centroids[c * dim + d];
+            foreign_dist += diff * diff;
+        }
+
+        float boundary_margin = foreign_dist - own_dist;
+        if (boundary_margin < 2.0f * reach) {
+            is_boundary = true;
+            break;
+        }
+    }
+    d_col[i] = is_boundary;
 }
 
 
@@ -281,19 +269,6 @@ static HaloGPU exchangeHalos(
 {
     int my_global_offset = rank_offsets[rank];
 
-    // Boundary detection on GPU: flag[i * n_ranks + r] = true if point i should go to rank r
-    thrust::device_vector<bool> d_flags(local_n * n_ranks, false);
-
-    {
-        int grid = (local_n + BLOCK_SIZE - 1) / BLOCK_SIZE;
-        detectBoundaryPoints<<<grid, BLOCK_SIZE>>>(
-            d_local_data, d_centroids, d_kth_distances,
-            thrust::raw_pointer_cast(d_flags.data()),
-            local_n, dim, n_clusters, n_ranks, rank);
-        CUDA_CHECK(cudaDeviceSynchronize());
-    }
-
-    // Per-rank compaction: for each target rank, stream-compact flagged point indices
     std::vector<int> send_counts_ids(n_ranks, 0);
     std::vector<int> send_counts_pts(n_ranks, 0);
     std::vector<thrust::device_vector<int>> d_per_rank_indices(n_ranks);
@@ -303,15 +278,15 @@ static HaloGPU exchangeHalos(
 
     thrust::device_vector<bool> d_col(local_n);
     thrust::device_vector<int> d_compact(local_n);
-    int col_grid = (local_n + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    int grid = (local_n + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
     for (int r = 0; r < n_ranks; r++) {
         if (r == rank) continue;
 
-        extractFlagColumn<<<col_grid, BLOCK_SIZE>>>(
-            thrust::raw_pointer_cast(d_flags.data()),
+        detectBoundaryForRank<<<grid, BLOCK_SIZE>>>(
+            d_local_data, d_centroids, d_kth_distances,
             thrust::raw_pointer_cast(d_col.data()),
-            local_n, n_ranks, r);
+            local_n, dim, n_clusters, n_ranks, rank, r);
         CUDA_CHECK(cudaDeviceSynchronize());
 
         auto end = thrust::copy_if(
@@ -325,7 +300,6 @@ static HaloGPU exchangeHalos(
         send_counts_ids[r] = count;
         send_counts_pts[r] = count * dim;
     }
-    d_flags.clear(); d_flags.shrink_to_fit();
     d_col.clear(); d_col.shrink_to_fit();
     d_compact.clear(); d_compact.shrink_to_fit();
     d_iota.clear(); d_iota.shrink_to_fit();
@@ -538,7 +512,7 @@ SparseMatrix buildSparseP(
 
     if (rank == 0) std::cout << "Total points across all ranks: " << N_total << std::endl;
 
-    // 1. LOCAL kNN (pass 1) — data stays on GPU
+    // 1. LOCAL kNN (pass 1)
     if (rank == 0) std::cout << "Step 2a: Initial local kNN (k=" << n_neighbors << ")..." << std::endl;
 
     KNNResult local_knn = runLocalKNN(
@@ -554,13 +528,14 @@ SparseMatrix buildSparseP(
             thrust::raw_pointer_cast(local_knn.d_distances.data()),
             thrust::raw_pointer_cast(d_kth_distances.data()),
             local_n, n_neighbors);
+        CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaDeviceSynchronize());
     }
 
     // Upload centroids to device
     thrust::device_vector<float> d_centroids(centroids, centroids + n_clusters * dim);
 
-    // 2. HALO EXCHANGE — ghost points arrive on GPU
+    // 2. HALO EXCHANGE - ghost points arrive on GPU
     if (rank == 0) std::cout << "Step 2b: Exchanging halo/ghost points with global IDs..." << std::endl;
 
     HaloGPU halo = exchangeHalos(
@@ -572,53 +547,66 @@ SparseMatrix buildSparseP(
 
     std::cout << "Rank " << rank << ": received " << halo.n_ghosts << " ghost points" << std::endl;
 
-    // 3. REFINED kNN (pass 2) — augmented index built on GPU
+    // 3. REFINED kNN (pass 2) - augmented index built on GPU via incremental add
     if (halo.n_ghosts > 0) {
         if (rank == 0) std::cout << "Step 2c: Recomputing kNN with ghosts ("
                                  << local_n + halo.n_ghosts << " total indexed)..." << std::endl;
-        if (rank == 1) std::cout << "Step 2c: Recomputing kNN with ghosts ("
-                                 << local_n + halo.n_ghosts << " total indexed)..." << std::endl;
 
-        size_t augmented_n = local_n + halo.n_ghosts;
-        float* d_augmented;
-        CUDA_CHECK(cudaMalloc(&d_augmented, augmented_n * dim * sizeof(float)));
-        CUDA_CHECK(cudaMemcpy(d_augmented, d_local_data,
-                              local_n * dim * sizeof(float), cudaMemcpyDeviceToDevice));
-        CUDA_CHECK(cudaMemcpy(d_augmented + local_n * dim, halo.d_ghost_points,
-                              halo.n_ghosts * dim * sizeof(float), cudaMemcpyDeviceToDevice));
+        int current_dev = 0;
+        cudaGetDevice(&current_dev);
 
-        local_knn = runLocalKNN(
-            d_augmented, augmented_n,
-            d_local_data, local_n,
-            dim, n_neighbors, true);
+        faiss::gpu::StandardGpuResources res;
+        faiss::gpu::GpuIndexFlatConfig config;
+        config.device = current_dev;
+        faiss::gpu::GpuIndexFlatL2 gpu_index(&res, dim, config);
 
-        cudaFree(d_augmented);
+        gpu_index.add(local_n, d_local_data);
+        gpu_index.add(halo.n_ghosts, halo.d_ghost_points);
+
+        int search_k = n_neighbors + 1;
+        thrust::device_vector<float> d_raw_dist(local_n * search_k);
+        thrust::device_vector<faiss::idx_t> d_raw_idx(local_n * search_k);
+
+        gpu_index.search(
+            local_n, d_local_data, search_k,
+            thrust::raw_pointer_cast(d_raw_dist.data()),
+            thrust::raw_pointer_cast(d_raw_idx.data()));
+
+        local_knn.d_distances.resize(local_n * n_neighbors);
+        local_knn.d_indices.resize(local_n * n_neighbors);
+        int total = local_n * n_neighbors;
+        int grid = (total + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        stripSelfNeighbor<<<grid, BLOCK_SIZE>>>(
+            thrust::raw_pointer_cast(d_raw_dist.data()),
+            thrust::raw_pointer_cast(d_raw_idx.data()),
+            thrust::raw_pointer_cast(local_knn.d_distances.data()),
+            thrust::raw_pointer_cast(local_knn.d_indices.data()),
+            local_n, n_neighbors);
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaDeviceSynchronize());
     }
 
-    // 4. COMPUTE CONDITIONAL P(j|i) — distances already on GPU
+    // 4. COMPUTE CONDITIONAL P(j|i) - distances already on GPU
     if (rank == 0) std::cout << "Step 2d: Computing conditional probabilities (perplexity="
                              << perplexity << ")..." << std::endl;
-
-    thrust::device_vector<float> d_p_values(local_n * n_neighbors);
-
+    
     float target_entropy = logf(perplexity);
     int grid = (local_n + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
     computeConditionalP<<<grid, BLOCK_SIZE, 0, stream>>>(
         thrust::raw_pointer_cast(local_knn.d_distances.data()),
-        thrust::raw_pointer_cast(d_p_values.data()),
         local_n,
         n_neighbors,
         target_entropy
     );
+    CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaStreamSynchronize(stream));
-    local_knn.d_distances.clear(); local_knn.d_distances.shrink_to_fit();
 
-    // Download P values and indices for COO emission
+    // Download P values (computed in-place over distances) and indices for COO emission
     std::vector<float> h_p(local_n * n_neighbors);
-    CUDA_CHECK(cudaMemcpy(h_p.data(), thrust::raw_pointer_cast(d_p_values.data()),
+    CUDA_CHECK(cudaMemcpy(h_p.data(), thrust::raw_pointer_cast(local_knn.d_distances.data()),
                local_n * n_neighbors * sizeof(float), cudaMemcpyDeviceToHost));
-    d_p_values.clear(); d_p_values.shrink_to_fit();
+    local_knn.d_distances.clear(); local_knn.d_distances.shrink_to_fit();
 
     std::vector<faiss::idx_t> h_indices(local_n * n_neighbors);
     CUDA_CHECK(cudaMemcpy(h_indices.data(), thrust::raw_pointer_cast(local_knn.d_indices.data()),
@@ -635,7 +623,7 @@ SparseMatrix buildSparseP(
     if (halo.d_ghost_points) cudaFree(halo.d_ghost_points);
     halo.d_ghost_global_ids.clear(); halo.d_ghost_global_ids.shrink_to_fit();
 
-    // 5. EMISSION — generate primary + mirror COO entries
+    // 5. EMISSION - generate primary + mirror COO entries
     if (rank == 0) std::cout << "Step 2e: Emitting COO entries (primary + mirror)..." << std::endl;
 
     std::vector<COOEntry> local_coo;
@@ -673,7 +661,7 @@ SparseMatrix buildSparseP(
     h_p.clear();
     h_ghost_ids.clear();
 
-    // 6. SHUFFLE — route mirrors to owner(j) via MPI alltoallv
+    // 6. SHUFFLE - route mirrors to owner(j) via MPI alltoallv
     if (rank == 0) std::cout << "Step 2f: Shuffling mirror entries across ranks..." << std::endl;
 
     std::vector<COOEntry> received_mirrors = shuffleMirrors(
