@@ -547,10 +547,21 @@ SparseMatrix buildSparseP(
 
     std::cout << "Rank " << rank << ": received " << halo.n_ghosts << " ghost points" << std::endl;
 
+    std::vector<int> h_ghost_ids(halo.n_ghosts);
+    if (halo.n_ghosts > 0) {
+        CUDA_CHECK(cudaMemcpy(h_ghost_ids.data(),
+                              thrust::raw_pointer_cast(halo.d_ghost_global_ids.data()),
+                              halo.n_ghosts * sizeof(int), cudaMemcpyDeviceToHost));
+    }
+    halo.d_ghost_global_ids.clear(); halo.d_ghost_global_ids.shrink_to_fit();
+
     // 3. REFINED kNN (pass 2) - augmented index built on GPU via incremental add
     if (halo.n_ghosts > 0) {
         if (rank == 0) std::cout << "Step 2c: Recomputing kNN with ghosts ("
                                  << local_n + halo.n_ghosts << " total indexed)..." << std::endl;
+
+        local_knn.d_distances.clear(); local_knn.d_distances.shrink_to_fit();
+        local_knn.d_indices.clear(); local_knn.d_indices.shrink_to_fit();
 
         int current_dev = 0;
         cudaGetDevice(&current_dev);
@@ -585,6 +596,7 @@ SparseMatrix buildSparseP(
         CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaDeviceSynchronize());
     }
+    if (halo.d_ghost_points) { cudaFree(halo.d_ghost_points); halo.d_ghost_points = nullptr; }
 
     // 4. COMPUTE CONDITIONAL P(j|i) - distances already on GPU
     if (rank == 0) std::cout << "Step 2d: Computing conditional probabilities (perplexity="
@@ -613,15 +625,6 @@ SparseMatrix buildSparseP(
                local_n * n_neighbors * sizeof(faiss::idx_t), cudaMemcpyDeviceToHost));
     local_knn.d_indices.clear(); local_knn.d_indices.shrink_to_fit();
 
-    // Download ghost global IDs for index translation
-    std::vector<int> h_ghost_ids(halo.n_ghosts);
-    if (halo.n_ghosts > 0) {
-        CUDA_CHECK(cudaMemcpy(h_ghost_ids.data(),
-                              thrust::raw_pointer_cast(halo.d_ghost_global_ids.data()),
-                              halo.n_ghosts * sizeof(int), cudaMemcpyDeviceToHost));
-    }
-    if (halo.d_ghost_points) cudaFree(halo.d_ghost_points);
-    halo.d_ghost_global_ids.clear(); halo.d_ghost_global_ids.shrink_to_fit();
 
     // 5. EMISSION - generate primary + mirror COO entries
     if (rank == 0) std::cout << "Step 2e: Emitting COO entries (primary + mirror)..." << std::endl;
