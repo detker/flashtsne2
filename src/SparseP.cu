@@ -323,30 +323,13 @@ SparseMatrix buildSparseP(
         });
     d_unique_keys.clear(); d_unique_keys.shrink_to_fit();
 
-    // Filter to only local rows with significant values
-    auto keep_end = thrust::remove_if(
-        thrust::make_zip_iterator(thrust::make_tuple(
-            d_coo_rows.begin(), d_coo_cols.begin(), d_reduced_vals.begin())),
-        thrust::make_zip_iterator(thrust::make_tuple(
-            d_coo_rows.end(), d_coo_cols.end(), d_reduced_vals.end())),
-        [local_n] __device__ (const thrust::tuple<int, int, float>& t) {
-            int row = thrust::get<0>(t);
-            float val = thrust::get<2>(t);
-            return row < 0 || row >= (int)local_n || val < 1e-12f;
-        });
-    int64_t nnz_final = keep_end - thrust::make_zip_iterator(thrust::make_tuple(
-        d_coo_rows.begin(), d_coo_cols.begin(), d_reduced_vals.begin()));
-    d_coo_rows.resize(nnz_final);
-    d_coo_cols.resize(nnz_final);
-    d_reduced_vals.resize(nnz_final);
-
     // 6. COO->CSR via cusparseXcoo2csr
     if (rank == 0) std::cout << "Step 2f: COO->CSR on GPU (cusparseXcoo2csr)..." << std::endl;
 
     SparseMatrix mat;
     mat.n_rows = local_n;
     mat.n_cols = N_total;
-    mat.nnz = nnz_final;
+    mat.nnz = nnz;
     mat.global_row_offset = my_global_offset;
     mat.col_indices = std::move(d_coo_cols);
     mat.values = std::move(d_reduced_vals);
@@ -357,7 +340,7 @@ SparseMatrix buildSparseP(
     CUSPARSE_CHECK(cusparseXcoo2csr(
         handle,
         thrust::raw_pointer_cast(d_coo_rows.data()),
-        nnz_final,
+        nnz,
         local_n,
         thrust::raw_pointer_cast(mat.row_offsets.data()),
         CUSPARSE_INDEX_BASE_ZERO
@@ -380,7 +363,7 @@ SparseMatrix buildSparseP(
 
     CUSPARSE_CHECK(cusparseDestroy(handle));
 
-    std::cout << "Rank " << rank << ": P matrix — "
+    std::cout << "Rank " << rank << ": P matrix - "
               << local_n << " rows, " << nnz << " nnz ("
               << (nnz > 0 ? (float)nnz / local_n : 0.0f) << " avg/row), "
               << "global cols [0.." << N_total << ")" << std::endl;
@@ -398,3 +381,4 @@ void destroySparseP(SparseMatrix& mat) {
     mat.col_indices.clear(); mat.col_indices.shrink_to_fit();
     mat.values.clear(); mat.values.shrink_to_fit();
 }
+

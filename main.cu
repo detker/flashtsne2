@@ -69,7 +69,6 @@ int main(int argc, char **argv)
         *communicator,
         d_cluster_data, cluster_n,
         dim, n_neighbors, perplexity,
-        km.centroids.data(), km.n_clusters,
         sparse_stream
     );
 
