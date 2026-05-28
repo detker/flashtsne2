@@ -20,16 +20,12 @@ struct SparseMatrix {
     cusparseSpMatDescr_t descr = nullptr;
 };
 
-/*                                                                         
-1. Local kNN (pass 1) → per-point reach                                    
-2. Halo exchange (points + global IDs)                                     
-3. Refined kNN (pass 2) with owned + ghost points                          
-4. Compute conditional P(j|i) for all neighbors                            
-5. Emission: generate (i_global, j_global, P(j|i)) + mirror (j_global, i_global, P(j|i))                                                              
-6. Shuffle: NCCL alltoallv (fallback MPI) to route mirrors to owner(j)     
-7. Merge local + received mirrors                                          
-8. Symmetrize: P_ij = (P(j|i) + P(i|j)) / (2*N_total)                      
-9. COO → CSR with cuSPARSE descriptor                                      
+/*
+1. Local kNN
+2. Compute conditional P(j|i) for all neighbors
+3. Emit COO entries with symmetric duplicates
+4. Symmetrize: P_ij = (P(j|i) + P(i|j)) / (2*N_total)
+5. COO -> CSR with cuSPARSE descriptor
 */
 SparseMatrix buildSparseP(
     NCCLCommunicator& comm,      // communicator for all collective operations
@@ -38,8 +34,6 @@ SparseMatrix buildSparseP(
     int dim,                     // high-dimensional data dimensionality
     int n_neighbors,             // number of nearest neighbors (typically 3 * perplexity)
     float perplexity,            // target perplexity for sigma calibration
-    const float* centroids,      // all cluster centroids [n_clusters * dim] (host)
-    int n_clusters,              // total number of clusters
     cudaStream_t stream
 );
 
