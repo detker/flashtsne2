@@ -7,6 +7,7 @@
 
 #include "ICommunicator.hpp"
 #include "Dataset.hpp"
+#include "PCAInit.hpp"
 #include "KMeansPartition.hpp"
 #include "SparseP.hpp"
 #include "utils.hpp"
@@ -29,36 +30,52 @@ int main(int argc, char **argv)
               << ", Local vectors: " << local_n << std::endl;
     float* local_x = dataset->get_shard_ptr(start_idx, dim);
 
-    // cudaHostRegister(local_x, local_n * dim * sizeof(float), cudaHostRegisterDefault);
     thrust::device_vector<float> local_cluster_data(local_x, local_x + local_n * dim);
 
-    // 1. KMEANS PARTITION + REDISTRIBUTE
-    const int K = 0.1 * local_n + 1;
-    KMeansResult km = kmeansPartition(*communicator, local_cluster_data, local_n, dim, n_clusters, niter, K);
-
+    const int n_components = std::min(50, dim);
+    PCAResult pca = distributedPCA(*communicator, local_cluster_data, local_n, dim, n_components);
     local_cluster_data.clear(); local_cluster_data.shrink_to_fit();
-    // save for debug
+    const int work_dim = pca.r;
+    if (rank == 0) {
+        std::cout << "PCA: dim " << dim << " -> " << work_dim
+                  << " components, init_scale=" << pca.init_scale << std::endl;
+    }
+
+    const int K = 0.1 * local_n + 1;
+    KMeansResult km = kmeansPartition(*communicator, std::move(pca.scores), local_n, work_dim, n_clusters, niter, K);
+    thrust::device_vector<float> d_y_init =
+        extractInit2D(km.local_data, km.local_n, work_dim, pca.init_scale);
+
     {
         std::vector<float> h_debug(km.local_data.size());
         thrust::copy(km.local_data.begin(), km.local_data.end(), h_debug.begin());
         std::ofstream ofs("../assignments_rank" + std::to_string(rank) + ".txt");
         for (size_t i = 0; i < km.local_n; i++) {
-            ofs << h_debug[i * dim] << " " << h_debug[i * dim + 1]
+            ofs << h_debug[i * work_dim] << " " << h_debug[i * work_dim + 1]
                 << " " << rank << "\n";
+        }
+    }
+
+    {
+        std::vector<float> h_init(d_y_init.size());
+        thrust::copy(d_y_init.begin(), d_y_init.end(), h_init.begin());
+        std::ofstream ofs("../y_init_rank" + std::to_string(rank) + ".txt");
+        for (size_t i = 0; i < km.local_n; i++) {
+            ofs << h_init[i * 2] << " " << h_init[i * 2 + 1] << " " << rank << "\n";
         }
     }
 
     if (rank == 0) {
         std::ofstream ofs("../centroids.txt");
         for (int c = 0; c < n_clusters; c++) {
-            ofs << km.centroids[c * dim] << " " << km.centroids[c * dim + 1] << "\n";
+            ofs << km.centroids[c * work_dim] << " " << km.centroids[c * work_dim + 1] << "\n";
         }
     }
 
     size_t cluster_n = km.local_n;
     float* d_cluster_data = thrust::raw_pointer_cast(km.local_data.data());
 
-    // 2. BUILD SPARSE P_IJ ON LOCAL CLUSTER - data stays on GPU
+    // 2. BUILD SPARSE P_IJ ON LOCAL CLUSTER
     cudaStream_t sparse_stream;
     cudaStreamCreate(&sparse_stream);
 
@@ -68,7 +85,7 @@ int main(int argc, char **argv)
     SparseMatrix P = buildSparseP(
         *communicator,
         d_cluster_data, cluster_n,
-        dim, n_neighbors, perplexity,
+        work_dim, n_neighbors, perplexity,
         sparse_stream
     );
 
@@ -110,7 +127,6 @@ int main(int argc, char **argv)
     destroySparseP(P);
     km.local_data.clear(); km.local_data.shrink_to_fit();
     cudaStreamDestroy(sparse_stream);
-    //cudaHostUnregister(local_x);
 
     delete communicator;
     delete dataset;

@@ -49,6 +49,20 @@
         exit(1);                                                                   \
     } } while(0)
 
+#define CUBLAS_CHECK(call) do {                                                    \
+    cublasStatus_t s = (call);                                                     \
+    if (s != CUBLAS_STATUS_SUCCESS) {                                              \
+        fprintf(stderr, "cuBLAS error %s:%d: %d\n", __FILE__, __LINE__, (int)s);   \
+        exit(1);                                                                   \
+    } } while(0)
+
+#define CUSOLVER_CHECK(call) do {                                                  \
+    cusolverStatus_t s = (call);                                                   \
+    if (s != CUSOLVER_STATUS_SUCCESS) {                                            \
+        fprintf(stderr, "cuSOLVER error %s:%d: %d\n", __FILE__, __LINE__, (int)s); \
+        exit(1);                                                                   \
+    } } while(0)
+
 inline void usage(const char* prog_name) {
     fprintf(stderr, "Usage: %s <data_path> <dim> <k> <niter>\n", prog_name);
     exit(EXIT_FAILURE);
