@@ -29,6 +29,21 @@ __global__ void extract2DKernel(const float* scores, float* out,
     out[i * 2 + 1] = scale * scores[i * (size_t)r + 1];
 }
 
+struct Pc1Moments {
+    const float* zp;
+    int rr;
+    __host__ __device__ float2 operator()(size_t i) const {
+        float v = zp[i * (size_t)rr];
+        return make_float2(v, v * v);
+    }
+};
+
+struct Float2Plus {
+    __host__ __device__ float2 operator()(const float2& a, const float2& b) const {
+        return make_float2(a.x + b.x, a.y + b.y);
+    }
+};
+
 
 PCAResult distributedPCA(
     NCCLCommunicator& comm,
@@ -166,9 +181,9 @@ PCAResult distributedPCA(
         thrust::device,
         thrust::counting_iterator<size_t>(0),
         thrust::counting_iterator<size_t>(local_n),
-        [=] __device__ (size_t i) -> float2 { float v = zp[i * (size_t)rr]; return make_float2(v, v * v); },
+        Pc1Moments{zp, rr},
         make_float2(0.0f, 0.0f),
-        [] __device__ (float2 a, float2 b) -> float2 { return make_float2(a.x + b.x, a.y + b.y); });
+        Float2Plus{});
     const float local_sum   = local_ss.x;
     const float local_sumsq = local_ss.y;
 
