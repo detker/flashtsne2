@@ -37,7 +37,8 @@ add_executable(hpc_app
     ${PROJECT_HEADERS}
     src/NCCLCommunicator.cu
     src/KMeansPartition.cu
-    src/SparseP.cu
+    src/KnnGraph.cu
+    src/PCAInit.cu
 )
 
 target_include_directories(hpc_app PRIVATE 
@@ -58,33 +59,25 @@ target_link_libraries(hpc_app PRIVATE
     ${NCCL_LIB}
     CUDA::cudart
     CUDA::cublas
+    CUDA::cusolver
     CUDA::cusparse
 )
 
-# Test binary for P_ij verification
-add_executable(test_pij
-    test_pij.cu
-    src/NCCLCommunicator.cu
-    src/SparseP.cu
+# Test binary for computeConditionalP kernel
+add_executable(test_conditional_p
+    test_conditional_p.cu
 )
 
-target_include_directories(test_pij PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
+target_include_directories(test_conditional_p PRIVATE
     ${CONDA_PREFIX}/include
 )
 
-target_link_directories(test_pij PRIVATE
+target_link_directories(test_conditional_p PRIVATE
     ${CONDA_PREFIX}/lib
 )
 
-target_compile_definitions(test_pij PRIVATE FAISS_ENABLE_GPU)
-target_compile_options(test_pij PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>)
+target_compile_options(test_conditional_p PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>)
 
-target_link_libraries(test_pij PRIVATE
-    MPI::MPI_CXX
-    ${FAISS_LIB}
-    ${NCCL_LIB}
+target_link_libraries(test_conditional_p PRIVATE
     CUDA::cudart
-    CUDA::cublas
-    CUDA::cusparse
 )
