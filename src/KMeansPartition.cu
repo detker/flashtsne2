@@ -21,6 +21,16 @@
 #include <iostream>
 
 
+struct RowGatherMap {
+    typedef size_t result_type;
+    const int* idx;
+    int dim;
+    __host__ __device__ size_t operator()(size_t o) const {
+        return (size_t)idx[o / dim] * dim + (o % dim);
+    }
+};
+
+
 KMeansResult kmeansPartition(
     NCCLCommunicator& comm,
     thrust::device_vector<float> local_cluster_data,
@@ -50,9 +60,7 @@ KMeansResult kmeansPartition(
     const int* d_idx = thrust::raw_pointer_cast(d_sample_indices.data());
     auto row_map = thrust::make_transform_iterator(
         thrust::counting_iterator<size_t>(0),
-        [d_idx, dim] __device__ (size_t o) -> size_t {
-            return (size_t)d_idx[o / dim] * dim + (o % dim);
-        });
+        RowGatherMap{d_idx, dim});
     thrust::gather(thrust::device,
                    row_map, row_map + (size_t)K * dim,
                    thrust::raw_pointer_cast(local_cluster_data.data()),
