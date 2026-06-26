@@ -2,14 +2,13 @@
 #include <vector>
 #include <fstream>
 #include <cuda_runtime.h>
-#include <cusparse.h>
 #include <thrust/device_vector.h>
 
 #include "ICommunicator.hpp"
 #include "Dataset.hpp"
 #include "PCAInit.hpp"
 #include "KMeansPartition.hpp"
-#include "SparseP.hpp"
+#include "KnnGraph.hpp"
 #include "utils.hpp"
 
 
@@ -43,6 +42,7 @@ int main(int argc, char **argv)
 
     const int K = 0.1 * local_n + 1;
     KMeansResult km = kmeansPartition(*communicator, std::move(pca.scores), local_n, work_dim, n_clusters, niter, K);
+
     thrust::device_vector<float> d_y_init =
         extractInit2D(km.local_data, km.local_n, work_dim, pca.init_scale);
 
@@ -72,62 +72,44 @@ int main(int argc, char **argv)
         }
     }
 
-    size_t cluster_n = km.local_n;
-    float* d_cluster_data = thrust::raw_pointer_cast(km.local_data.data());
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
 
-    // 2. BUILD SPARSE P_IJ ON LOCAL CLUSTER
-    cudaStream_t sparse_stream;
-    cudaStreamCreate(&sparse_stream);
+    float perplexity = config.perplexity;
+    int n_neighbors = perplexity*3;
 
-    float perplexity = 30.0f;
-    int n_neighbors = perplexity * 3;
-
-    SparseMatrix P = buildSparseP(
+    KnnGraph knn = computeKnnGraph(
         *communicator,
-        d_cluster_data, cluster_n,
-        work_dim, n_neighbors, perplexity,
-        sparse_stream
-    );
+        std::move(km.local_data),
+        std::move(d_y_init),
+        km.local_n, work_dim, n_neighbors,
+        stream);
 
-    std::cout << "Rank: " << rank << ". Done." << std::endl;
+    int n_rows_to_print = std::min<int>(knn.n_local, 5);
+    int cols_to_show = std::min(knn.k, 5);
+    std::vector<int>   h_idx((size_t)n_rows_to_print * knn.k);
+    std::vector<float> h_dst((size_t)n_rows_to_print * knn.k);
+    cudaMemcpy(h_idx.data(), thrust::raw_pointer_cast(knn.indices.data()),
+               h_idx.size() * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_dst.data(), thrust::raw_pointer_cast(knn.distances.data()),
+               h_dst.size() * sizeof(float), cudaMemcpyDeviceToHost);
 
-    int n_rows_to_print = std::min((int)P.n_rows, 5);
-    std::vector<int> h_row_off(n_rows_to_print + 1);
-    cudaMemcpy(h_row_off.data(), thrust::raw_pointer_cast(P.row_offsets.data()),
-               (n_rows_to_print + 1) * sizeof(int), cudaMemcpyDeviceToHost);
-
-    int max_nnz = h_row_off[n_rows_to_print];
-    std::vector<int> h_cols(max_nnz);
-    std::vector<float> h_vals(max_nnz);
-    cudaMemcpy(h_cols.data(), thrust::raw_pointer_cast(P.col_indices.data()),
-               max_nnz * sizeof(int), cudaMemcpyDeviceToHost);
-    cudaMemcpy(h_vals.data(), thrust::raw_pointer_cast(P.values.data()),
-               max_nnz * sizeof(float), cudaMemcpyDeviceToHost);
-
-    std::cout << "\n=== Rank " << rank << " P matrix sample (first "
-              << n_rows_to_print << " rows) ===" << std::endl;
+    std::cout << "\n=== Rank " << rank << " k-NN sample (first "
+              << n_rows_to_print << " rows, " << cols_to_show << "/" << knn.k
+              << " neighbors, (id, dist^2)) ===" << std::endl;
     for (int r = 0; r < n_rows_to_print; r++) {
-        int global_row = P.global_row_offset + r;
-        int start = h_row_off[r], end = h_row_off[r+1];
-        std::cout << "  row " << global_row << " (" << (end - start) << " nnz): ";
-        int to_show = std::min(end - start, 5);
-        for (int j = 0; j < to_show; j++) {
-            std::cout << "(" << h_cols[start+j] << ", " << h_vals[start+j] << ") ";
+        int64_t gid = knn.global_offset + r;
+        std::cout << "  local " << r << " (global " << gid << "): ";
+        for (int j = 0; j < cols_to_show; j++) {
+            int c = r * knn.k + j;
+            std::cout << "(" << h_idx[c] << ", " << h_dst[c] << ") ";
         }
-        if (end - start > 5) std::cout << "...";
+        if (knn.k > cols_to_show) std::cout << "...";
         std::cout << std::endl;
     }
     std::cout << std::endl;
 
-    cusparseHandle_t cusparse_handle;
-    cusparseCreate(&cusparse_handle);
-    cusparseSetStream(cusparse_handle, sparse_stream);
-
-    cusparseDestroy(cusparse_handle);
-    destroySparseP(P);
-    km.local_data.clear(); km.local_data.shrink_to_fit();
-    cudaStreamDestroy(sparse_stream);
-
+    cudaStreamDestroy(stream);
     delete communicator;
     delete dataset;
     return EXIT_SUCCESS;
