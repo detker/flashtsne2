@@ -49,7 +49,10 @@ PCAResult distributedPCA(
     const float* d_X = thrust::raw_pointer_cast(local_x.data());  // A = X^T (D x n)
     // in row-major format [n, D]
 
-    thrust::device_vector<float> d_S((size_t)D * D, 0.0f);   // reused as C, then eigenvectors
+    // Uninitialized: syrk (beta=0) writes the lower triangle and the upper
+    // triangle is never read (syr/syevd use FILL_MODE_LOWER) - no zero-init
+    float* d_S = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_S, (size_t)D * D * sizeof(float)));   // reused as C, then eigenvectors
     thrust::device_vector<float> d_a(D, 0.0f);               // column sums, then mean (mu)
     thrust::device_vector<float> d_ones(local_n, 1.0f);
 
@@ -57,7 +60,7 @@ PCAResult distributedPCA(
     CUBLAS_CHECK(cublasSsyrk(blas, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_N,
                              D, (int)local_n, &one,
                              d_X, D, &zero,
-                             thrust::raw_pointer_cast(d_S.data()), D));
+                             d_S, D));
     // a = A * 1_n  (D-vector of column sums of X). gemv op=N, A is D x n.
     CUBLAS_CHECK(cublasSgemv(blas, CUBLAS_OP_N, D, (int)local_n, &one,
                              d_X, D,
@@ -67,7 +70,7 @@ PCAResult distributedPCA(
     d_ones.clear(); d_ones.shrink_to_fit();
 
     comm.allReduce<CommunicationBackend::NCCL>(
-        nullptr, thrust::raw_pointer_cast(d_S.data()), (size_t)D * D,
+        nullptr, d_S, (size_t)D * D,
         CommDataType::FLOAT, CommOp::SUM);
     comm.allReduce<CommunicationBackend::NCCL>(
         nullptr, thrust::raw_pointer_cast(d_a.data()), (size_t)D,
@@ -83,7 +86,7 @@ PCAResult distributedPCA(
     const float neg_inv_N = -1.0f / (float)total_n;
     CUBLAS_CHECK(cublasSsyr(blas, CUBLAS_FILL_MODE_LOWER, D, &neg_inv_N,
                             thrust::raw_pointer_cast(d_a.data()), 1,
-                            thrust::raw_pointer_cast(d_S.data()), D));
+                            d_S, D));
     const float inv_N = 1.0f / (float)total_n;
     CUBLAS_CHECK(cublasSscal(blas, D, &inv_N,
                              thrust::raw_pointer_cast(d_a.data()), 1));
@@ -97,14 +100,14 @@ PCAResult distributedPCA(
     int lwork = 0;
     CUSOLVER_CHECK(cusolverDnSsyevd_bufferSize(
         solver, CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_LOWER, D,
-        thrust::raw_pointer_cast(d_S.data()), D,
+        d_S, D,
         thrust::raw_pointer_cast(d_W.data()), &lwork));
     float* d_work = nullptr;
     CUDA_CHECK(cudaMalloc(&d_work, (size_t)lwork * sizeof(float)));
 
     CUSOLVER_CHECK(cusolverDnSsyevd(
         solver, CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_LOWER, D,
-        thrust::raw_pointer_cast(d_S.data()), D,
+        d_S, D,
         thrust::raw_pointer_cast(d_W.data()),
         d_work, lwork, d_info));
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -118,7 +121,7 @@ PCAResult distributedPCA(
 
     // build V (D x r, col-major) = top-r eigenvectors in DESCENDING order
     thrust::device_vector<float> d_V((size_t)D * r);
-    const float* eigvecs = thrust::raw_pointer_cast(d_S.data());
+    const float* eigvecs = d_S;
     float* Vp = thrust::raw_pointer_cast(d_V.data());
     for (int j = 0; j < r; ++j) {
         CUDA_CHECK(cudaMemcpy(Vp + (size_t)j * D,
@@ -158,18 +161,16 @@ PCAResult distributedPCA(
     // scale PC1, PC2 for tsne init
     const float* zp = thrust::raw_pointer_cast(res.scores.data());
     const int rr = r;
-    float local_sum = thrust::transform_reduce(
+    // accumulate sum and sumsq together.
+    float2 local_ss = thrust::transform_reduce(
         thrust::device,
         thrust::counting_iterator<size_t>(0),
         thrust::counting_iterator<size_t>(local_n),
-        [=] __device__ (size_t i) -> float { return zp[i * (size_t)rr]; },
-        0.0f, thrust::plus<float>());
-    float local_sumsq = thrust::transform_reduce(
-        thrust::device,
-        thrust::counting_iterator<size_t>(0),
-        thrust::counting_iterator<size_t>(local_n),
-        [=] __device__ (size_t i) -> float { float v = zp[i * (size_t)rr]; return v * v; },
-        0.0f, thrust::plus<float>());
+        [=] __device__ (size_t i) -> float2 { float v = zp[i * (size_t)rr]; return make_float2(v, v * v); },
+        make_float2(0.0f, 0.0f),
+        [] __device__ (float2 a, float2 b) -> float2 { return make_float2(a.x + b.x, a.y + b.y); });
+    const float local_sum   = local_ss.x;
+    const float local_sumsq = local_ss.y;
 
     thrust::device_vector<float> d_stats(2);
     d_stats[0] = local_sum;
@@ -188,6 +189,7 @@ PCAResult distributedPCA(
     res.r = r;
     res.local_n = local_n;
 
+    cudaFree(d_S);
     cudaFree(d_work);
     cudaFree(d_info);
     cublasDestroy(blas);
