@@ -39,7 +39,6 @@ add_executable(hpc_app
     src/KMeansPartition.cu
     src/KnnGraph.cu
     src/PCAInit.cu
-    src/SparseP.cu
     src/SymmetrizeP.cu
 )
 

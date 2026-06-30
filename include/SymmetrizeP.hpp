@@ -4,14 +4,12 @@
 #include <thrust/device_vector.h>
 #include <cstdint>
 
+#include "KnnGraph.hpp"
+
 // Symmetric high-dimensional affinity matrix P in CSR form, owned on one GPU.
 //
-// Assumption: this GPU holds N points (X, row-major [N*d]) and, for each point,
-// the LOCAL indices of its K nearest neighbors (neighbors, row-major [N*K],
-// every entry in [0, N)). Nothing else is needed.
-//
 // Pipeline (all device-resident; host only sees O(1) scalars):
-//   1. distances    D[i,k] = ||x_i - x_{neighbors[i,k]}||^2
+//   1. distances    D[i,k] from knn.distances (squared L2, precomputed by FAISS)
 //   2. conditional  P(j|i) via per-row perplexity (beta) binary search
 //   3. emit         2*N*K triplets: (i,j,P(j|i)) and (j,i,P(j|i))
 //   4. sort+reduce  group duplicate (row,col), summing -> P(j|i)+P(i|j)
@@ -29,13 +27,10 @@ struct CsrMatrix {
     int64_t nnz = 0;
 };
 
-// d_data      : device ptr, [N*d] row-major points
-// d_neighbors : device ptr, [N*K] row-major LOCAL neighbor indices, each in [0,N)
+// Build the symmetric P from a local k-NN graph.
+// knn         : KnnGraph from computeKnnGraph (uses .distances, .indices, .n_local, .k)
+// perplexity  : target perplexity for the per-row beta binary search
 CsrMatrix buildSymmetricP(
-    const float* d_data,
-    const int*   d_neighbors,
-    int          N,
-    int          d,
-    int          K,
-    float        perplexity,
-    cudaStream_t stream = 0);
+    const KnnGraph& knn,
+    float           perplexity,
+    cudaStream_t    stream = 0);

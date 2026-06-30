@@ -9,6 +9,7 @@
 #include "PCAInit.hpp"
 #include "KMeansPartition.hpp"
 #include "KnnGraph.hpp"
+#include "SymmetrizeP.hpp"
 #include "utils.hpp"
 
 
@@ -108,6 +109,10 @@ int main(int argc, char **argv)
         std::cout << std::endl;
     }
     std::cout << std::endl;
+
+    CsrMatrix P = buildSymmetricP(knn, perplexity, stream);
+    std::cout << "Rank " << rank << ": symmetric P built - " << P.n
+              << " x " << P.n << ", nnz=" << P.nnz << std::endl;
 
     cudaStreamDestroy(stream);
     delete communicator;

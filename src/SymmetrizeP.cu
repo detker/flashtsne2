@@ -2,6 +2,7 @@
 #include "error_utils.hpp"
 
 #include <thrust/device_vector.h>
+#include <thrust/copy.h>
 #include <thrust/sort.h>
 #include <thrust/reduce.h>
 #include <thrust/transform.h>
@@ -18,32 +19,7 @@ static constexpr int   MAX_BINARY_SEARCH_ITERS = 100;
 static constexpr float PERPLEXITY_TOL          = 1e-5f;
 
 
-// 1. D[i,k] = ||x_i - x_{neighbors[i,k]}||^2   (one thread per (i,k) pair)
-__global__ void knnDistances(
-    const float* __restrict__ X,
-    const int*   __restrict__ nbr,
-    float*       __restrict__ dist,
-    int N, int d, int K)
-{
-    int64_t t = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (t >= (int64_t)N * K) return;
-
-    int i = (int)(t / K);
-    int j = nbr[t];
-
-    const float* xi = X + (int64_t)i * d;
-    const float* xj = X + (int64_t)j * d;
-
-    float s = 0.0f;
-    for (int c = 0; c < d; c++) {
-        float diff = xi[c] - xj[c];
-        s += diff * diff;
-    }
-    dist[t] = s;
-}
-
-
-// 2. P(j|i) via per-row beta (precision) binary search to match target perplexity.
+// 1. P(j|i) via per-row beta (precision) binary search to match target perplexity.
 //    Overwrites the distance row in place: row[k] <- P(neighbor_k | i).
 __global__ void conditionalP(
     float* __restrict__ dist,
@@ -93,7 +69,7 @@ __global__ void conditionalP(
 }
 
 
-// 3. Emit both directions. For pair (i, j=nbr, p): write (i,j,p) and (j,i,p),
+// 2. Emit both directions. For pair (i, j=nbr, p): write (i,j,p) and (j,i,p),
 //    each as a packed key = row*N + col plus the value.
 __global__ void emitTriplets(
     const int*   __restrict__ nbr,
@@ -123,26 +99,23 @@ struct KeyToCol {
 
 
 CsrMatrix buildSymmetricP(
-    const float* d_data,
-    const int*   d_neighbors,
-    int          N,
-    int          d,
-    int          K,
-    float        perplexity,
-    cudaStream_t stream)
+    const KnnGraph& knn,
+    float           perplexity,
+    cudaStream_t    stream)
 {
     auto policy = thrust::cuda::par.on(stream);
-    const int64_t NK = (int64_t)N * K;
 
-    // 1. neighbor distances ------------------------------------------------
+    const int     N  = (int)knn.n_local;
+    const int     K  = knn.k;
+    const int64_t NK = (int64_t)N * K;
+    const int*    d_neighbors = thrust::raw_pointer_cast(knn.indices.data());
+
+    // 1. neighbor distances: reuse the squared-L2 distances FAISS already wrote
+    //    into the k-NN graph. Copy them into a working buffer so conditionalP can
+    //    overwrite it with P(j|i) without clobbering knn.distances.
     thrust::device_vector<float> d_dist(NK);
-    {
-        int grid = (int)((NK + BLOCK_SIZE - 1) / BLOCK_SIZE);
-        knnDistances<<<grid, BLOCK_SIZE, 0, stream>>>(
-            d_data, d_neighbors,
-            thrust::raw_pointer_cast(d_dist.data()), N, d, K);
-        CUDA_CHECK(cudaGetLastError());
-    }
+    thrust::copy(policy, knn.distances.begin(), knn.distances.begin() + NK,
+                 d_dist.begin());
 
     // 2. conditional P(j|i) (in place over distances) ----------------------
     {
