@@ -161,9 +161,8 @@ CsrMatrix buildSymmetricP(
     M.n   = N;
     M.nnz = nnz;
 
-    // values
     M.values.resize(nnz);
-    float norm = 1.0f / (2.0f * (float)N);
+    float norm = 1.0f / (2.0f * (float)knn.n_total);
     thrust::transform(policy,
         d_uvals.begin(), d_uvals.begin() + nnz,
         M.values.begin(),
