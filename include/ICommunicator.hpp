@@ -66,6 +66,10 @@ public:
     thrust::device_vector<float> distributeData(faiss::idx_t *d_assignments, int dim,
                                                 float *d_local_x, int n_local);
 
+    // Ring shift: send buffer to rank+1, receive rank-1's buffer.
+    // Shard sizes may differ per rank; counts are exchanged via MPI first.
+    thrust::device_vector<float> ringExchange(thrust::device_vector<float> out);
+
     static ncclDataType_t mapTypeNCCL(CommDataType t);
     static size_t typeSizeNCCL(CommDataType t);
     static ncclRedOp_t mapOpNCCL(CommOp op);

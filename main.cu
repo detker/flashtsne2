@@ -10,6 +10,7 @@
 #include "KMeansPartition.hpp"
 #include "KnnGraph.hpp"
 #include "SymmetrizeP.hpp"
+#include "TsneOptimizer.hpp"
 #include "utils.hpp"
 
 
@@ -113,6 +114,20 @@ int main(int argc, char **argv)
     CsrMatrix P = buildSymmetricP(knn, perplexity, stream);
     std::cout << "Rank " << rank << ": symmetric P built - " << P.n
               << " x " << P.n << ", nnz=" << P.nnz << std::endl;
+
+    TsneOptParams opt_params;
+    thrust::device_vector<float> d_y = optimizeTsne(
+        *communicator, P, std::move(knn.y), knn.n_local, knn.n_total,
+        opt_params, stream);
+
+    {
+        std::vector<float> h_y(d_y.size());
+        thrust::copy(d_y.begin(), d_y.end(), h_y.begin());
+        std::ofstream ofs("../y_final_rank" + std::to_string(rank) + ".txt");
+        for (size_t i = 0; i < knn.n_local; i++) {
+            ofs << h_y[i * 2] << " " << h_y[i * 2 + 1] << " " << rank << "\n";
+        }
+    }
 
     cudaStreamDestroy(stream);
     delete communicator;

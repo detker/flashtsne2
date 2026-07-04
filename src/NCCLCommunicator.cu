@@ -177,3 +177,23 @@ MPI_Op NCCLCommunicator::mapOpMPI(CommOp op) {
         default: return MPI_OP_NULL;
     }
 }
+
+
+thrust::device_vector<float> NCCLCommunicator::ringExchange(thrust::device_vector<float> out) {
+  if (_size == 1) return out;
+  const int right = (_rank + 1) % _size;
+  const int left  = (_rank - 1 + _size) % _size;
+
+  uint64_t send_n = out.size(), recv_n = 0;
+  MPI_Sendrecv(&send_n, 1, MPI_UINT64_T, right, 0,
+               &recv_n, 1, MPI_UINT64_T, left, 0,
+               MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
+  thrust::device_vector<float> in(recv_n);
+  NCCL_CHECK(ncclGroupStart());
+  NCCL_CHECK(ncclSend(out.data().get(), send_n, ncclFloat, right, _nccl_comm, _stream));
+  NCCL_CHECK(ncclRecv(in.data().get(), recv_n, ncclFloat, left, _nccl_comm, _stream));
+  NCCL_CHECK(ncclGroupEnd());
+  CUDA_CHECK(cudaStreamSynchronize(_stream));
+  return in;
+}

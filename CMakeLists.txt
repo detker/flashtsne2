@@ -29,6 +29,9 @@ set(CMAKE_INSTALL_RPATH "${CONDA_PREFIX}/lib")
 
 file(GLOB PROJECT_HEADERS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp")
 
+# Vendored snapshot of github.com/ayoopierre/QuadTreeGpu (see QuadTreeGpu/)
+set(QUADTREE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/QuadTreeGpu/QuadTree")
+
 set(MPI_CXX_COMPILER "${CONDA_PREFIX}/bin/mpicxx")
 find_package(MPI REQUIRED)
 
@@ -40,10 +43,13 @@ add_executable(hpc_app
     src/KnnGraph.cu
     src/PCAInit.cu
     src/SymmetrizeP.cu
+    src/TsneOptimizer.cu
+    ${QUADTREE_DIR}/src/quad_tree_builder.cu
 )
 
-target_include_directories(hpc_app PRIVATE 
+target_include_directories(hpc_app PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${QUADTREE_DIR}/inc
     ${CONDA_PREFIX}/include
 )
 
