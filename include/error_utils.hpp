@@ -12,29 +12,6 @@
         exit(1);                                                                              \
     } } while(0)
 
-
-// void nccl_check(ncclResult_t status, const char *file, int line) {
-//   if (status != ncclSuccess) {
-//     printf("[NCCL ERROR] at file %s:%d:\n%s\n", file, line,
-//            ncclGetErrorString(status));
-//     exit(EXIT_FAILURE);
-//   }
-// }
-// #define NCCL_CHECK(err) (nccl_check(err, __FILE__, __LINE__))
-
-// void mpi_check(int status, const char *file, int line) {
-//   if (status != MPI_SUCCESS) {
-//     char mpi_error[4096];
-//     int mpi_error_len = 0;
-//     assert(MPI_Error_string(status, &mpi_error[0], &mpi_error_len) ==
-//            MPI_SUCCESS);
-//     printf("[MPI ERROR] at file %s:%d:\n%.*s\n", file, line, mpi_error_len,
-//            mpi_error);
-//     exit(EXIT_FAILURE);
-//   }
-// }
-// #define MPI_CHECK(err) (mpi_check(err, __FILE__, __LINE__))
-
 #define NCCL_CHECK(call) do {                                                                 \
     ncclResult_t r = (call);                                                                   \
     if (r != ncclSuccess) {                                                                   \
@@ -49,7 +26,21 @@
         exit(1);                                                                   \
     } } while(0)
 
+#define CUBLAS_CHECK(call) do {                                                    \
+    cublasStatus_t s = (call);                                                     \
+    if (s != CUBLAS_STATUS_SUCCESS) {                                              \
+        fprintf(stderr, "cuBLAS error %s:%d: %d\n", __FILE__, __LINE__, (int)s);   \
+        exit(1);                                                                   \
+    } } while(0)
+
+#define CUSOLVER_CHECK(call) do {                                                  \
+    cusolverStatus_t s = (call);                                                   \
+    if (s != CUSOLVER_STATUS_SUCCESS) {                                            \
+        fprintf(stderr, "cuSOLVER error %s:%d: %d\n", __FILE__, __LINE__, (int)s); \
+        exit(1);                                                                   \
+    } } while(0)
+
 inline void usage(const char* prog_name) {
-    fprintf(stderr, "Usage: %s <data_path> <dim> <k> <niter>\n", prog_name);
+    fprintf(stderr, "Usage: %s <data_path> <dim> <k> <niter> [perplexity=30]\n", prog_name);
     exit(EXIT_FAILURE);
 }

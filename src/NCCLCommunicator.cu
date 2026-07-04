@@ -59,18 +59,15 @@ thrust::device_vector<float> NCCLCommunicator::distributeData(faiss::idx_t *d_as
   cudaSetDevice(_local_gpu_id);
   auto get_target_node = [=](int cluster_id) { return cluster_id % _size; };
 
-  // Copy assignments to host for metadata computation
   std::vector<faiss::idx_t> h_assignments(n_local);
   cudaMemcpy(h_assignments.data(), d_assignments, n_local * sizeof(faiss::idx_t),
              cudaMemcpyDeviceToHost);
 
-  // Compute per-rank send counts (metadata on CPU)
   std::vector<int> send_counts(_size, 0);
   for (auto &label : h_assignments) {
     send_counts[get_target_node(label)] += dim;
   }
 
-  // Exchange counts via MPI (small metadata)
   std::vector<int> receive_counts(_size);
   allToAll<CommunicationBackend::MPI>(
       send_counts.data(), 1, CommDataType::INT,
@@ -88,7 +85,6 @@ thrust::device_vector<float> NCCLCommunicator::distributeData(faiss::idx_t *d_as
     total_recv += receive_counts[c];
   }
 
-  // Compute sort keys on host, then sort on device
   thrust::device_vector<int> d_sort_keys(n_local);
   {
     std::vector<int> h_sort_keys(n_local);
@@ -102,29 +98,23 @@ thrust::device_vector<float> NCCLCommunicator::distributeData(faiss::idx_t *d_as
   thrust::sequence(d_indices.begin(), d_indices.end());
   thrust::sort_by_key(d_sort_keys.begin(), d_sort_keys.end(), d_indices.begin());
 
-  // Copy local_x from host to device
-  // float *d_local_x;
-  // cudaMalloc(&d_local_x, (size_t)n_local * dim * sizeof(float));
-  // cudaMemcpy(d_local_x, local_x, (size_t)n_local * dim * sizeof(float),
-  //            cudaMemcpyHostToDevice);
-
-  thrust::device_vector<float> d_send(n_local * dim);
+  float *d_send = nullptr;
+  cudaMalloc(&d_send, (size_t)n_local * dim * sizeof(float));
   {
     int total = n_local * dim;
     int block = 256;
     int grid = (total + block - 1) / block;
-    gather_rows<<<grid, block>>>(d_local_x, thrust::raw_pointer_cast(d_send.data()),
+    gather_rows<<<grid, block>>>(d_local_x, d_send,
                                  thrust::raw_pointer_cast(d_indices.data()), n_local, dim);
     cudaStreamSynchronize(0);
   }
 
-  // cudaFree(d_local_x);
-
-  // Bulk data exchange via NCCL
   thrust::device_vector<float> d_recv(total_recv);
   allToAllV<CommunicationBackend::NCCL>(
-      thrust::raw_pointer_cast(d_send.data()), send_counts.data(), send_displs.data(), CommDataType::FLOAT,
+      d_send, send_counts.data(), send_displs.data(), CommDataType::FLOAT,
       thrust::raw_pointer_cast(d_recv.data()), receive_counts.data(), receive_displs.data(), CommDataType::FLOAT);
+
+  cudaFree(d_send);
 
   return d_recv;
 }
