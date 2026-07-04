@@ -43,7 +43,7 @@ int main(int argc, char **argv)
     }
 
     const int K = 0.1 * local_n + 1;
-    KMeansResult km = kmeansPartition(*communicator, std::move(pca.scores), local_n, work_dim, n_clusters, niter, K);
+    KMeansResult km = kmeansPartition(*communicator, std::move(pca.scores), local_n, work_dim, n_clusters, niter, K, (int64_t)start_idx);
 
     thrust::device_vector<float> d_y_init =
         extractInit2D(km.local_data, km.local_n, work_dim, pca.init_scale);
@@ -121,11 +121,16 @@ int main(int argc, char **argv)
         opt_params, stream);
 
     {
+        // columns: x y rank original_row_id  (id joins rows back to the
+        // input .dat order, e.g. datasets/mnist_labels.txt)
         std::vector<float> h_y(d_y.size());
         thrust::copy(d_y.begin(), d_y.end(), h_y.begin());
+        std::vector<int64_t> h_ids(km.ids.size());
+        thrust::copy(km.ids.begin(), km.ids.end(), h_ids.begin());
         std::ofstream ofs("../y_final_rank" + std::to_string(rank) + ".txt");
         for (size_t i = 0; i < knn.n_local; i++) {
-            ofs << h_y[i * 2] << " " << h_y[i * 2 + 1] << " " << rank << "\n";
+            ofs << h_y[i * 2] << " " << h_y[i * 2 + 1] << " " << rank
+                << " " << h_ids[i] << "\n";
         }
     }
 
