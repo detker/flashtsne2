@@ -1,0 +1,9 @@
+*.exe
+*.lib
+*.obj
+*.json
+*.exp
+*.a
+*.qdstrm
+
+build/
