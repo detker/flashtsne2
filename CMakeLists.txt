@@ -1,66 +1,51 @@
 cmake_minimum_required(VERSION 3.18)
 
-if(DEFINED ENV{CONDA_PREFIX})
-    set(CMAKE_CUDA_COMPILER "$ENV{CONDA_PREFIX}/bin/nvcc")
-endif()
-
+set(FAISS_ROOT "/mnt/evafs/groups/hpc-gpca-lab/wkrolikowski/software/faiss_cpp" CACHE PATH "faiss install root")
 
 project(faiss_dist LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
-set(CONDA_PREFIX $ENV{CONDA_PREFIX})
-
+set(CMAKE_CUDA_STANDARD 20)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-find_package(MPI REQUIRED)
+set(QUADTREE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/QuadTree")
+
 find_package(CUDAToolkit REQUIRED)
-
-find_library(FAISS_LIB NAMES faiss HINTS ${CONDA_PREFIX}/lib REQUIRED)
-find_library(NCCL_LIB NAMES nccl HINTS ${CONDA_PREFIX}/lib REQUIRED)
-
-set(CMAKE_BUILD_RPATH "${CONDA_PREFIX}/lib")
-set(CMAKE_INSTALL_RPATH "${CONDA_PREFIX}/lib")
-
-file(GLOB PROJECT_HEADERS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp")
-
-set(MPI_CXX_COMPILER "${CONDA_PREFIX}/bin/mpicxx")
 find_package(MPI REQUIRED)
+find_package(OpenMP REQUIRED)
+find_package(BLAS REQUIRED)
 
-# Add NCCL wrapper
-file(GLOB_RECURSE WRAPPER_SOURCES "NCCLwrapper/src/*.cu" "NCCLwrapper/src/*.cpp")
-add_library(nccl_wrapper_lib STATIC ${WRAPPER_SOURCES})
-target_include_directories(nccl_wrapper_lib PUBLIC 
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/NCCLwrapper/inc>
-)
-target_compile_options(nccl_wrapper_lib PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>)
+find_library(FAISS_LIB NAMES faiss
+            HINTS ${FAISS_ROOT}/lib ${FAISS_ROOT}/lib64 REQUIRED)
+find_library(NCCL_LIB NAMES nccl
+            HINTS ${FAISS_ROOT}/lib ${CUDAToolkit_LIBRARY_DIR} /usr/lib/x86_64-linux-gnu REQUIRED)
 
-# Add QuadTree library
-file(GLOB_RECURSE LIB_SOURCES "QuadTree/src/*.cu" "QuadTree/src/*.cpp")
-add_library(quad_tree_lib STATIC ${LIB_SOURCES})
-target_include_directories(quad_tree_lib PUBLIC 
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/QuadTree/inc>
-)
-target_compile_options(quad_tree_lib PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>)
+set(CMAKE_INSTALL_RPATH "${FAISS_ROOT}/lib;${FAISS_ROOT}/lib64")
+set(CMAKE_BUILD_RPATH   "${FAISS_ROOT}/lib;${FAISS_ROOT}/lib64")
 
 add_executable(hpc_app
     main.cu
-    ${PROJECT_HEADERS}
     src/NCCLCommunicator.cu
     src/KMeansPartition.cu
     src/KnnGraph.cu
     src/PCAInit.cu
     src/SymmetrizeP.cu
+    src/TsneOptimizer.cu
+    ${QUADTREE_DIR}/src/quad_tree_builder.cu
 )
 
-target_include_directories(hpc_app PRIVATE 
+file(GLOB PROJECT_HEADERS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp")
+if(PROJECT_HEADERS)
+    target_sources(hpc_app PRIVATE ${PROJECT_HEADERS})
+endif()
+
+target_include_directories(hpc_app PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CONDA_PREFIX}/include
-)
-
-target_link_directories(hpc_app PRIVATE 
-    ${CONDA_PREFIX}/lib
+    ${QUADTREE_DIR}/inc
+    ${CMAKE_CURRENT_SOURCE_DIR}/NCCLwrapper/inc
+    ${FAISS_ROOT}/include
 )
 
 target_compile_definitions(hpc_app PRIVATE FAISS_ENABLE_GPU)
@@ -72,8 +57,8 @@ target_link_libraries(hpc_app PRIVATE
     ${NCCL_LIB}
     CUDA::cudart
     CUDA::cublas
-    CUDA::cusolver
     CUDA::cusparse
-    quad_tree_lib
-    nccl_wrapper_lib
+    CUDA::cusolver
+    OpenMP::OpenMP_CXX
+    ${BLAS_LIBRARIES}
 )

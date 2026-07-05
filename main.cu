@@ -4,7 +4,6 @@
 #include <cuda_runtime.h>
 #include <thrust/device_vector.h>
 #include <utility>
-#include <tuple>
 
 #include "ICommunicator.hpp"
 #include "Dataset.hpp"
@@ -12,146 +11,10 @@
 #include "KMeansPartition.hpp"
 #include "KnnGraph.hpp"
 #include "SymmetrizeP.hpp"
+#include "TsneOptimizer.hpp"
 #include "utils.hpp"
 
-/* Tree computation libs */
 #include "NcclRing.cuh"
-#include "quad_tree_builder.cuh"
-#include "quad_tree_traversor.cuh"
-
-static std::tuple<
-    thrust::device_vector<float>, // X back
-    thrust::device_vector<float>, // Y back
-    thrust::device_vector<float>, // X grad
-    thrust::device_vector<float>, // Y grad 
-    float // Z
-> circulate(
-    const NcclRing& ring,
-    QuadTreeTraversor<TsneApproxCond, TsneNodeHanlder, TsneLeafHandler>& traversor,
-    thrust::device_vector<float> x,
-    thrust::device_vector<float> y
-){
-    size_t size{x.size()};
-    thrust::device_vector<float> grad_x(size, 0.0f), grad_y(size, 0.0f);
-    float z{0.0f}, tmp_z{0.0f};
-
-    for(size_t i{0}; i < ring.size(); i++){
-        traversor.load_points(std::move(x), std::move(y));
-
-        std::tie(grad_x, grad_y, tmp_z) = traversor.traverse(
-            std::move(grad_x),
-            std::move(grad_y)
-        );
-        std::tie(x, y) = traversor.get_points();
-
-        z += tmp_z;
-
-        x = ring.ring_exchange(std::move(x));
-        y = ring.ring_exchange(std::move(y));
-        grad_x = ring.ring_exchange(std::move(grad_x));
-        grad_y = ring.ring_exchange(std::move(grad_y));
-    }
-    /* To get back original tensor we need one more hop */
-    x = ring.ring_exchange(std::move(x));
-    y = ring.ring_exchange(std::move(y));
-    grad_x = ring.ring_exchange(std::move(grad_x));
-    grad_y = ring.ring_exchange(std::move(grad_y));
-
-    return std::tuple<
-        thrust::device_vector<float>, // X back
-        thrust::device_vector<float>, // Y back
-        thrust::device_vector<float>, // X grad
-        thrust::device_vector<float>, // Y grad 
-        float // Z
-    >{
-        std::move(x), std::move(y),
-        std::move(grad_x), std::move(grad_y),
-        z
-    };
-}
-
-/*
-    Inputs:
-    ring - NCCL ring communicator wrapper (initialized eariler via MPI)
-    x - x coordinates of low dim points
-    y - y coordinates of low dim points
-    num_points - number of points for this rank
-    Outputs:
-    x_grad - x components of gradient for each point [num_points, 1]
-    y_grad - y components of gradient for each point [num_points, 1]
-    x, y - returns low dimensional points back
-    z - normalization factor
-*/
-static std::tuple<
-    thrust::device_vector<float>,
-    thrust::device_vector<float>,
-    thrust::device_vector<float>,
-    thrust::device_vector<float>,
-    float
-> step_ring(
-    const NcclRing& ring,
-    thrust::device_vector<float> x,
-    thrust::device_vector<float> y
-){
-    thrust::device_vector<uint32_t> permutation_idx{}, nlen{}, f_pos{}, length{};
-    thrust::device_vector<uint8_t> is_leaf{};
-    thrust::device_vector<float> x_com{}, y_com{}, x_grad{}, y_grad{};
-    float z, face_len;
-
-    ParallelQuadtreeBuilder tree_builder;
-    tree_builder.bind_arguments(std::move(x),std::move(y));
-
-    std::tie(
-        permutation_idx, nlen, f_pos, length, is_leaf, x_com, y_com
-    ) = tree_builder.build_tree();
-    face_len = tree_builder.get_face_len();
-
-    std::tie(x, y) = tree_builder.retrive_arguments();
-
-    QuadTreeTraversor<TsneApproxCond, TsneNodeHanlder, TsneLeafHandler> traversor;
-
-    traversor.load_tree(
-        std::move(nlen),
-        std::move(f_pos),
-        std::move(length),
-        std::move(is_leaf),
-        std::move(x_com),
-        std::move(y_com)
-    );
-    
-    traversor.set_face_lenght(face_len);
-
-    std::tie(
-        x, y, x_grad, y_grad, z
-    ) = circulate(
-        ring,
-        traversor,
-        std::move(x),
-        std::move(y)
-    );
-
-    /* thrust::stable_sort_by_key */
-    thrust::sort_by_key(
-        permutation_idx.begin(),
-        permutation_idx.end(),
-        thrust::make_zip_iterator(
-            thrust::make_tuple(
-                x.begin(),
-                y.begin(),
-                x_grad.begin(),
-                y_grad.begin()
-            )
-        )
-    );
-
-    return {
-        std::move(x_grad),
-        std::move(y_grad),
-        std::move(x),
-        std::move(y),
-        z
-    };
-}
 
 
 int main(int argc, char **argv)
@@ -183,7 +46,7 @@ int main(int argc, char **argv)
     }
 
     const int K = 0.1 * local_n + 1;
-    KMeansResult km = kmeansPartition(*communicator, std::move(pca.scores), local_n, work_dim, n_clusters, niter, K);
+    KMeansResult km = kmeansPartition(*communicator, std::move(pca.scores), local_n, work_dim, n_clusters, niter, K, (int64_t)start_idx);
 
     thrust::device_vector<float> d_y_init =
         extractInit2D(km.local_data, km.local_n, work_dim, pca.init_scale);
@@ -255,18 +118,25 @@ int main(int argc, char **argv)
     std::cout << "Rank " << rank << ": symmetric P built - " << P.n
               << " x " << P.n << ", nnz=" << P.nnz << std::endl;
 
-    /* Setup for ring computation */
     NcclRing ring(MPI_COMM_WORLD);
-    size_t num_pts = knn.n_local;
 
-    thrust::device_ptr<float> begin = knn.y.data();
-    thrust::device_ptr<float> mid = begin + num_pts;
-    thrust::device_ptr<float> end = mid + num_pts;
+    TsneOptParams opt_params;
+    thrust::device_vector<float> d_y = optimizeTsne(
+        *communicator, ring, P, std::move(knn.y), knn.n_local, knn.n_total,
+        opt_params, stream);
 
-    thrust::device_vector<float> x(begin, mid), y(mid, end), x_grad{}, y_grad{};
-    float Z;
-    
-    std::tie(x, y, x_grad, y_grad, Z) = step_ring(ring, std::move(x), std::move(y));
+    {
+        // columns: x y rank original_row_id
+        std::vector<float> h_y(d_y.size());
+        thrust::copy(d_y.begin(), d_y.end(), h_y.begin());
+        std::vector<int64_t> h_ids(km.ids.size());
+        thrust::copy(km.ids.begin(), km.ids.end(), h_ids.begin());
+        std::ofstream ofs("../y_final_rank" + std::to_string(rank) + ".txt");
+        for (size_t i = 0; i < knn.n_local; i++) {
+            ofs << h_y[i * 2] << " " << h_y[i * 2 + 1] << " " << rank
+                << " " << h_ids[i] << "\n";
+        }
+    }
 
     cudaStreamDestroy(stream);
     delete communicator;
