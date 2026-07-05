@@ -9,6 +9,16 @@
 
 #include "node.cuh"
 
+/*
+ Named functor instead of an extended lambda - the HPC cluster toolchain
+ rejects extended lambdas inside thrust::make_transform_iterator.
+*/
+struct CastU8ToU64 {
+    __device__ __host__ uint64_t operator()(uint8_t v) const {
+        return static_cast<uint64_t>(v);
+    }
+};
+
 static void __attribute__((unused)) show_tree(thrust::device_vector<uint64_t> key, thrust::device_vector<bool> is_leaf,
     thrust::device_vector<uint32_t> f_pos, thrust::device_vector<uint32_t> length,
     thrust::device_vector<float> x, thrust::device_vector<float> y,
@@ -406,10 +416,9 @@ ParallelQuadtreeBuilder::trim_redundant_nodes(
 {
     thrust::device_vector<uint64_t> node_child_start(clen.size()); 
     /* Value initialization is important - by default exclusive_scan happens on uint8_t and it overflows */
-    auto cast = [] __device__ __host__ (uint8_t v) { return static_cast<uint64_t>(v); };
     thrust::exclusive_scan(
-        thrust::make_transform_iterator(clen.begin(), cast),
-        thrust::make_transform_iterator(clen.end(), cast),
+        thrust::make_transform_iterator(clen.begin(), CastU8ToU64{}),
+        thrust::make_transform_iterator(clen.end(), CastU8ToU64{}),
         node_child_start.begin(),
         uint64_t{1}
     );
