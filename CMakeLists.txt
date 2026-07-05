@@ -1,8 +1,4 @@
 cmake_minimum_required(VERSION 3.18)
-#
-#if(NOT DEFINED ENV{CONDA_PREFIX})
-#    message(FATAL_ERROR "'conda activate faiss'")
-#endif()
 
 if(DEFINED ENV{CONDA_PREFIX})
     set(CMAKE_CUDA_COMPILER "$ENV{CONDA_PREFIX}/bin/nvcc")
@@ -11,14 +7,14 @@ endif()
 
 project(faiss_dist LANGUAGES CXX CUDA)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(CONDA_PREFIX $ENV{CONDA_PREFIX})
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-#find_package(MPI REQUIRED)
+find_package(MPI REQUIRED)
 find_package(CUDAToolkit REQUIRED)
 
 find_library(FAISS_LIB NAMES faiss HINTS ${CONDA_PREFIX}/lib REQUIRED)
@@ -31,6 +27,22 @@ file(GLOB PROJECT_HEADERS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/include
 
 set(MPI_CXX_COMPILER "${CONDA_PREFIX}/bin/mpicxx")
 find_package(MPI REQUIRED)
+
+# Add NCCL wrapper
+file(GLOB_RECURSE WRAPPER_SOURCES "NCCLwrapper/src/*.cu" "NCCLwrapper/src/*.cpp")
+add_library(nccl_wrapper_lib STATIC ${WRAPPER_SOURCES})
+target_include_directories(nccl_wrapper_lib PUBLIC 
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/NCCLwrapper/inc>
+)
+target_compile_options(nccl_wrapper_lib PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>)
+
+# Add QuadTree library
+file(GLOB_RECURSE LIB_SOURCES "QuadTree/src/*.cu" "QuadTree/src/*.cpp")
+add_library(quad_tree_lib STATIC ${LIB_SOURCES})
+target_include_directories(quad_tree_lib PUBLIC 
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/QuadTree/inc>
+)
+target_compile_options(quad_tree_lib PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>)
 
 add_executable(hpc_app
     main.cu
@@ -62,23 +74,6 @@ target_link_libraries(hpc_app PRIVATE
     CUDA::cublas
     CUDA::cusolver
     CUDA::cusparse
-)
-
-# Test binary for computeConditionalP kernel
-add_executable(test_conditional_p
-    test_conditional_p.cu
-)
-
-target_include_directories(test_conditional_p PRIVATE
-    ${CONDA_PREFIX}/include
-)
-
-target_link_directories(test_conditional_p PRIVATE
-    ${CONDA_PREFIX}/lib
-)
-
-target_compile_options(test_conditional_p PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>)
-
-target_link_libraries(test_conditional_p PRIVATE
-    CUDA::cudart
+    quad_tree_lib
+    nccl_wrapper_lib
 )
