@@ -1,15 +1,6 @@
 cmake_minimum_required(VERSION 3.18)
 
-# Local builds use the conda env (conda activate faiss); on the cluster the
-# module toolchain is used and faiss comes from FAISS_ROOT below (override
-# with -DFAISS_ROOT=... if it moves).
-if(DEFINED ENV{CONDA_PREFIX})
-    set(CMAKE_CUDA_COMPILER "$ENV{CONDA_PREFIX}/bin/nvcc")
-    set(MPI_CXX_COMPILER "$ENV{CONDA_PREFIX}/bin/mpicxx")
-    set(FAISS_ROOT "$ENV{CONDA_PREFIX}" CACHE PATH "faiss install root")
-else()
-    set(FAISS_ROOT "/mnt/evafs/groups/hpc-gpca-lab/wkrolikowski/software/faiss_cpp" CACHE PATH "faiss install root")
-endif()
+set(FAISS_ROOT "/mnt/evafs/groups/hpc-gpca-lab/wkrolikowski/software/faiss_cpp" CACHE PATH "faiss install root")
 
 project(faiss_dist LANGUAGES CXX CUDA)
 
