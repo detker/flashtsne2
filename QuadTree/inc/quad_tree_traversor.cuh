@@ -20,8 +20,6 @@
  we terminate early on subtree instead of traversing deeper
 */
 
-constexpr float theta = 0.5f;
-
 struct TsneApproxCond{
     inline bool __device__ __host__ operator()(float x_com, float y_com, float x, float y,
         float face_len, uint8_t level, float theta){
@@ -79,6 +77,8 @@ static __global__ void traverse_impl(
     const float *y_com_d,
     const float *x_d,
     const float *y_d,
+    const float *px_d,
+    const float *py_d,
     const float face_length_d,
     const float theta,
     const size_t size,
@@ -134,11 +134,16 @@ static __global__ void traverse_impl(
                 for(uint32_t i = 0; i < length_d[node_idx]; i++)
                 {
                     uint32_t leaf_idx = f_pos_d[node_idx] + i;
-                    /* Skip self interaction */
-                    if(tid == leaf_idx) continue;
+                    /*
+                     Leaf positions index the local tree's points, not the
+                     loaded (possibly visiting) points. Self interaction is
+                     not skipped: on the home hop each point meets itself
+                     with zero force and exactly +1 to Z, removed once
+                     globally as n_total by the caller.
+                    */
                     add_vec3(res, leaf_handler(
-                        x_d[leaf_idx],
-                        y_d[leaf_idx],
+                        px_d[leaf_idx],
+                        py_d[leaf_idx],
                         x, y
                     ));
                 }
@@ -190,6 +195,23 @@ public:
 
     inline void set_face_lenght(float face_length){
         this->face_length = face_length;
+    }
+
+    inline void set_theta(float theta){
+        this->theta = theta;
+    }
+
+    /*
+     Tree points (in the builder's sorted order) referenced by leaf
+     positions. Kept separate from load_points: the loaded points may be
+     a visiting shard while the tree stays local.
+    */
+    inline void load_tree_points(
+        thrust::device_vector<float> px,
+        thrust::device_vector<float> py
+    ){
+        this->px = std::move(px);
+        this->py = std::move(py);
     }
 
     inline void load_points(
@@ -272,11 +294,13 @@ public:
             *length_d = length.data().get();
         const uint8_t 
             *is_leaf_d = is_leaf.data().get();
-        const float 
+        const float
             *x_com_d = x_com.data().get(),
             *y_com_d = y_com.data().get(),
             *x_d = x.data().get(),
-            *y_d = y.data().get();
+            *y_d = y.data().get(),
+            *px_d = px.data().get(),
+            *py_d = py.data().get();
         const float face_length_d = face_length;
 
         
@@ -298,7 +322,9 @@ public:
             x_com_d, 
             y_com_d,
             x_d,
-            y_d, 
+            y_d,
+            px_d,
+            py_d,
             face_length_d,
             theta,
             size,
@@ -337,10 +363,15 @@ public:
 
 private:
     float face_length;
+    float theta{0.5f};
 
     /* Do not modify points here */
     thrust::device_vector<float> x;
     thrust::device_vector<float> y;
+
+    /* Local tree's points, dereferenced by leaf handlers */
+    thrust::device_vector<float> px;
+    thrust::device_vector<float> py;
 
     thrust::device_vector<uint32_t> nlen;
     thrust::device_vector<uint32_t> f_pos;

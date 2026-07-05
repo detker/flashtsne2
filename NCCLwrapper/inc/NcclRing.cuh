@@ -66,31 +66,27 @@ public:
 
     template <typename T>
     inline thrust::device_vector<T> ring_exchange(thrust::device_vector<T> out) const {
-        size_t send_size = out.size(), recv_size;
+        size_t send_size = out.size(), recv_size = 0;
 
-        ncclGroupStart();
-        ncclSend( &send_size, 1,
-            ncclUint64, right(),
-            comm_, stream_);
-
-        ncclRecv(
-            &recv_size, 1, 
-            ncclUint64, left(),
-            comm_, stream_);
-
-        ncclGroupEnd();
-        cudaStreamSynchronize(stream_);
+        /*
+         Element counts live in host memory, NCCL only moves device
+         buffers - exchange them over MPI instead.
+        */
+        MPI_Sendrecv(
+            &send_size, 1, MPI_UINT64_T, right(), 0,
+            &recv_size, 1, MPI_UINT64_T, left(), 0,
+            mpi_comm_, MPI_STATUS_IGNORE);
 
         thrust::device_vector<T> in(recv_size);
 
         ncclGroupStart();
         ncclSend(
-            out.data().get(), send_size,
+            out.data().get(), send_size * sizeof(T),
             ncclChar, right(),
             comm_, stream_);
 
         ncclRecv(
-            in.data().get(), recv_size, 
+            in.data().get(), recv_size * sizeof(T),
             ncclChar, left(),
             comm_, stream_);
 

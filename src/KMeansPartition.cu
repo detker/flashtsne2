@@ -11,6 +11,7 @@
 
 #include <thrust/device_vector.h>
 #include <thrust/gather.h>
+#include <thrust/sequence.h>
 #include <thrust/execution_policy.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/iterator/transform_iterator.h>
@@ -38,7 +39,8 @@ KMeansResult kmeansPartition(
     int dim,
     int n_clusters,
     int niter,
-    int samples_per_rank)
+    int samples_per_rank,
+    int64_t start_id)
 {
     int rank = comm.getRank();
     int size = comm.getSize();
@@ -125,9 +127,13 @@ KMeansResult kmeansPartition(
     cudaDeviceSynchronize();
 
 
-    // redistribute points so each rank owns spatially nearby points
+    // redistribute points so each rank owns spatially nearby points;
+    // original row ids travel with the rows
+    thrust::device_vector<int64_t> row_ids(local_n);
+    thrust::sequence(row_ids.begin(), row_ids.end(), start_id);
     auto distributed_points = comm.distributeData(
-        thrust::raw_pointer_cast(d_labels.data()), dim, thrust::raw_pointer_cast(local_cluster_data.data()), local_n);
+        thrust::raw_pointer_cast(d_labels.data()), dim, thrust::raw_pointer_cast(local_cluster_data.data()), local_n,
+        &row_ids);
 
     d_distances.clear(); d_distances.shrink_to_fit();
     d_labels.clear(); d_labels.shrink_to_fit();
@@ -140,6 +146,7 @@ KMeansResult kmeansPartition(
     KMeansResult result;
     result.centroids = std::move(centroids);
     result.local_data = std::move(distributed_points);
+    result.ids = std::move(row_ids);
     result.local_n = cluster_n;
     result.n_clusters = n_clusters;
     return result;

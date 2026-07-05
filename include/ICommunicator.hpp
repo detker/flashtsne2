@@ -63,8 +63,15 @@ public:
                    CommDataType sendType, void* recvbuff, const int* recvcounts,
                    const int* rdispls, CommDataType recvType);
 
+    // row_ids (optional, in/out): per-row ids that travel with the rows -
+    // on return holds the ids of the rows this rank received.
     thrust::device_vector<float> distributeData(faiss::idx_t *d_assignments, int dim,
-                                                float *d_local_x, int n_local);
+                                                float *d_local_x, int n_local,
+                                                thrust::device_vector<int64_t> *row_ids = nullptr);
+
+    // Ring shift: send buffer to rank+1, receive rank-1's buffer.
+    // Shard sizes may differ per rank; counts are exchanged via MPI first.
+    thrust::device_vector<float> ringExchange(thrust::device_vector<float> out);
 
     static ncclDataType_t mapTypeNCCL(CommDataType t);
     static size_t typeSizeNCCL(CommDataType t);
