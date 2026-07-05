@@ -118,7 +118,6 @@ int main(int argc, char **argv)
     std::cout << "Rank " << rank << ": symmetric P built - " << P.n
               << " x " << P.n << ", nnz=" << P.nnz << std::endl;
 
-    /* Setup for ring computation */
     NcclRing ring(MPI_COMM_WORLD);
 
     TsneOptParams opt_params;
@@ -127,8 +126,7 @@ int main(int argc, char **argv)
         opt_params, stream);
 
     {
-        // columns: x y rank original_row_id  (id joins rows back to the
-        // input .dat order, e.g. datasets/mnist_labels.txt)
+        // columns: x y rank original_row_id
         std::vector<float> h_y(d_y.size());
         thrust::copy(d_y.begin(), d_y.end(), h_y.begin());
         std::vector<int64_t> h_ids(km.ids.size());

@@ -14,13 +14,13 @@ class NcclRing;
 // momentum, early exaggeration).
 //
 // Per iteration:
-//   1. build a local quadtree over this rank's 2D points (QuadTree/)
-//   2. step_ring: circulate every rank's point shard around the NCCL ring;
-//      each hop accumulates repulsive forces + partial Z of the visiting
-//      shard against the local tree, so after `size` hops each shard
-//      returns home with its full repulsive gradient
-//   3. allreduce Z, compute attractive forces from the local CSR P
-//   4. grad_i = 4 * (exaggeration * F_attr_i - F_rep_i / Z), apply update
+// 1. build a local quadtree over this rank's 2D points (QuadTree/)
+// 2. step_ring: circulate every rank's point shard around the NCCL ring;
+//    each hop accumulates repulsive forces + partial Z of the visiting
+//    shard against the local tree, so after `size` hops each shard
+//    returns home with its full repulsive gradient
+// 3. allreduce Z, compute attractive forces from the local CSR P
+// 4. grad_i = 4 * (exaggeration * F_attr_i - F_rep_i / Z), apply update
 struct TsneOptParams {
     int   n_iter             = 1000;
     float eta                = 200.0f;  // learning rate
@@ -33,11 +33,7 @@ struct TsneOptParams {
     float min_gain           = 0.01f;
 };
 
-// P       : symmetric affinities from buildSymmetricP (local ids, globally
-//           normalized by 1/(2*n_total))
-// ring    : ring communicator used to circulate point shards (step_ring)
-// y_init  : [n_local * 2] interleaved low-dim init (KnnGraph::y), consumed
-// returns : final embedding [n_local * 2], interleaved, same row order as P
+
 thrust::device_vector<float> optimizeTsne(
     NCCLCommunicator&            comm,
     const NcclRing&              ring,

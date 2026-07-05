@@ -68,10 +68,7 @@ public:
     inline thrust::device_vector<T> ring_exchange(thrust::device_vector<T> out) const {
         size_t send_size = out.size(), recv_size = 0;
 
-        /*
-         Element counts live in host memory, NCCL only moves device
-         buffers - exchange them over MPI instead.
-        */
+        /* Element counts exchange over MPI. */
         MPI_Sendrecv(
             &send_size, 1, MPI_UINT64_T, right(), 0,
             &recv_size, 1, MPI_UINT64_T, left(), 0,

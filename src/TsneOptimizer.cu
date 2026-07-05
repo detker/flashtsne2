@@ -27,12 +27,6 @@ __global__ void deinterleaveKernel(const float* y, int n, float* xs, float* ys)
     ys[i] = y[2 * i + 1];
 }
 
-/*
-    One full ring circulation (moved here from main.cu). Each hop the
-    resident shard traverses this rank's tree, accumulating repulsive
-    forces and partial Z; grads travel with their shard, so after
-    ring.size() exchanges every shard is back home with its full gradient.
-*/
 static std::tuple<
     thrust::device_vector<float>, // X back
     thrust::device_vector<float>, // Y back
@@ -67,7 +61,6 @@ static std::tuple<
             grad_y = ring.ring_exchange(std::move(grad_y));
         }
     }
-    /* ring.size() in-loop exchanges already bring every shard back home */
 
     return std::tuple<
         thrust::device_vector<float>, // X back

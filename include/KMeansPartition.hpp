@@ -16,7 +16,7 @@ struct KMeansResult {
 
 KMeansResult kmeansPartition(
     NCCLCommunicator& comm,
-    thrust::device_vector<float> local_cluster_data,         // host ptr, this rank's initial shard
+    thrust::device_vector<float> local_cluster_data, // host ptr, this rank's initial shard
     size_t local_n,         // number of vectors in initial shard
     int dim,
     int n_clusters,
